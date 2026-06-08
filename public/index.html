@@ -40,7 +40,6 @@
       cursor: pointer;
       -webkit-tap-highlight-color: transparent;
       touch-action: manipulation;
-      /* make sure the button is tappable */
       position: relative;
       z-index: 100;
     }
@@ -77,6 +76,13 @@
       font-size: 16px;
       opacity: 0.7;
       letter-spacing: 1px;
+    }
+
+    #role-note {
+      font-size: 11px;
+      letter-spacing: 3px;
+      opacity: 0.45;
+      margin-top: 8px;
     }
 
     #intensity-val {
@@ -134,12 +140,12 @@
     <div id="role-label">YOUR ROLE</div>
     <div id="role-name">--</div>
     <div id="role-instruction">SHAKE IT</div>
+    <div id="role-note">YOU DID NOT CHOOSE THIS</div>
     <div id="intensity-val">0</div>
   </div>
 
   <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
   <script>
-    // config
     const ROLE_NAMES = ["01 PULSE","02 RIFT","03 VOID","04 GLITCH","05 SURGE"];
     const ROLE_COLORS = [
       "#00ffb4",
@@ -156,45 +162,36 @@
       "YOU ARE THE SURGE",
     ];
 
-    // state
-    let myDeviceId = Math.floor(Math.random() * 1000000);
     let myRole = -1;
     let smoothedShake = 0;
     let isConnected = false;
 
-    // ===== Socket =====
     const socket = io("/");
 
     socket.on('connect', () => {
-      console.log('Socket connected:', socket.id);
+      console.log('socket connected:', socket.id);
     });
 
-    socket.on('shake', (data) => {
-      // receive role assignment from the host
-      if (data.isHost && data.targetId === myDeviceId) {
-        myRole = data.role;
-        applyRole(myRole);
-      }
-    });
-
-    // switch to game screen and apply role
-    function applyRole(role) {
+    // role is now assigned by the server the moment the phone connects
+    socket.on('roleAssigned', (data) => {
+      myRole = data.role;
       document.getElementById('waiting-screen').style.display = 'none';
-      document.getElementById('game-screen').style.display = 'flex';
+      applyRole(myRole);
+    });
 
+    function applyRole(role) {
+      document.getElementById('game-screen').style.display = 'flex';
       let c = ROLE_COLORS[role] || '#ffffff';
-      document.getElementById('role-name').innerText = ROLE_NAMES[role] || '--';
-      document.getElementById('role-name').style.color = c;
-      document.getElementById('role-instruction').innerText = ROLE_INSTRUCTIONS[role] || 'SHAKE';
+      document.getElementById('role-name').innerText  = ROLE_NAMES[role]        || '--';
+      document.getElementById('role-name').style.color        = c;
+      document.getElementById('role-instruction').innerText   = ROLE_INSTRUCTIONS[role] || 'SHAKE';
       document.getElementById('role-instruction').style.color = c;
-      document.getElementById('role-label').style.color = c;
+      document.getElementById('role-label').style.color       = c;
+      document.getElementById('role-note').style.color        = c;
       document.getElementById('bar-container').style.background = c;
-      document.body.style.background = '#000';
     }
 
-    // join button handler
     document.getElementById('join-btn').addEventListener('click', function() {
-      // iOS 13+ requires explicit permission for motion sensors
       if (typeof DeviceMotionEvent !== 'undefined' &&
           typeof DeviceMotionEvent.requestPermission === 'function') {
         DeviceMotionEvent.requestPermission()
@@ -204,22 +201,20 @@
           })
           .catch(err => {
             console.error(err);
-            startSensors(); // continue even if permission fails
+            startSensors();
           });
       } else {
-        // Android or desktop — no permission needed
         startSensors();
       }
     });
 
     function startSensors() {
-      document.getElementById('join-screen').style.display = 'none';
+      document.getElementById('join-screen').style.display   = 'none';
       document.getElementById('waiting-screen').style.display = 'flex';
       isConnected = true;
       startSendLoop();
     }
 
-    // read motion sensor data
     let accX = 0, accY = 0, accZ = 0;
 
     window.addEventListener('devicemotion', (e) => {
@@ -230,7 +225,6 @@
       }
     });
 
-    // send loop — fires every 30ms (~33fps)
     function startSendLoop() {
       setInterval(() => {
         if (!isConnected) return;
@@ -239,19 +233,14 @@
         smoothedShake = smoothedShake * 0.75 + rawShake * 0.25;
         let val = Math.min(smoothedShake, 180);
 
-        // send to the host computer
-        socket.emit('shake', { id: myDeviceId, val: val });
+        // send shake data — role is included so p5.js knows who is shaking
+        socket.emit('shake', { id: socket.id, val: val, role: myRole });
 
-        // update UI
         if (myRole >= 0) {
           let pct = (val / 180) * 100;
           document.getElementById('bar-container').style.height = pct + '%';
           document.getElementById('intensity-val').innerText = Math.round(val);
-
-          // background darkens with intensity
           let bg = Math.round(val / 180 * 30);
-          let c = ROLE_COLORS[myRole] || '#ffffff';
-          // simple dark background when no role assigned yet
           document.body.style.background = `rgb(${bg},${bg},${bg})`;
         }
       }, 30);
