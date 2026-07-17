@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SWARM 服务器监控台</title>
+  <!-- socket.io 的客户端脚本由服务器自动提供，直接这样引就行 -->
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    body{background:#0d0b08;color:#ffb45a;font-family:ui-monospace,Menlo,Consolas,monospace;margin:0;padding:24px;}
+    h1{font-size:18px;letter-spacing:2px;color:#ff8c00;margin:0 0 4px;}
+    .sub{color:#8a7350;font-size:12px;margin-bottom:20px;}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;max-width:760px;}
+    .card{background:#1a1509;border:1px solid #3a2f16;border-radius:8px;padding:14px;}
+    .label{font-size:11px;color:#8a7350;letter-spacing:1px;text-transform:uppercase;}
+    .value{font-size:30px;font-weight:700;margin-top:6px;font-variant-numeric:tabular-nums;}
+    .status-online{color:#7CFC00;}
+    .status-offline{color:#ff4040;}
+    .bar{height:14px;background:#2a2210;border-radius:7px;overflow:hidden;margin-top:8px;}
+    .bar-fill{height:100%;background:#ff8c00;width:100%;transition:width .1s linear;}
+    .btns{margin:22px 0 10px;display:flex;gap:10px;flex-wrap:wrap;max-width:760px;}
+    button{background:#ff8c00;color:#000;border:0;border-radius:6px;padding:12px 18px;font-size:14px;font-weight:700;cursor:pointer;}
+    button.ghost{background:#241d0e;color:#ffb45a;border:1px solid #3a2f16;}
+    button:active{transform:translateY(1px);}
+    #big{background:#7CFC00;}
+    .log{background:#000;border:1px solid #3a2f16;border-radius:8px;padding:12px;height:200px;overflow:auto;font-size:12px;line-height:1.6;max-width:760px;margin-top:14px;color:#9fd;}
+    .log .sugar{color:#7CFC00;} .log .knife{color:#ff7070;} .log .sys{color:#ff8c00;} .log .st{color:#6aa;}
+  </style>
+</head>
+<body>
+  <h1>SWARM · SERVER MONITOR</h1>
+  <div class="sub">这是服务器自带的调试台。可在这里模拟触摸、观察状态机、验证 OFFLINE 与恢复。</div>
+
+  <div class="grid">
+    <div class="card"><div class="label">系统状态 status</div><div class="value" id="status">—</div></div>
+    <div class="card"><div class="label">能量 energy</div><div class="value" id="energy">—</div>
+      <div class="bar"><div class="bar-fill" id="energyBar"></div></div></div>
+    <div class="card"><div class="label">本轮触摸 / 阈值</div><div class="value" id="cycle">—</div></div>
+    <div class="card"><div class="label">总触摸数 total</div><div class="value" id="total">—</div></div>
+    <div class="card"><div class="label">贡献计数 contribution</div><div class="value" id="contrib">—</div></div>
+  </div>
+
+  <div class="btns">
+    <button id="touchBtn">模拟一次触摸 (touch)</button>
+    <button id="big" onclick="spam()">连摸 10 次</button>
+    <button class="ghost" onclick="socket.emit('admin:forceOffline')">强制 OFFLINE</button>
+    <button class="ghost" onclick="socket.emit('admin:reset')">重置本轮</button>
+  </div>
+
+  <div class="log" id="log"></div>
+
+<script>
+  // 连到本机服务器
+  const socket = io();
+
+  const $ = (id) => document.getElementById(id);
+  function log(msg, cls){ const l=$('log'); l.innerHTML = `<div class="${cls||''}">${new Date().toLocaleTimeString()} · ${msg}</div>` + l.innerHTML; }
+
+  // 点按钮 = 发一次 touch 事件（模拟手机触摸），随机带个坐标
+  $('touchBtn').onclick = () => socket.emit('touch', { x: Math.random(), y: Math.random() });
+  function spam(){ for(let i=0;i<10;i++) setTimeout(()=>socket.emit('touch',{x:Math.random(),y:Math.random()}), i*60); }
+
+  // ── 监听服务器广播的各种事件 ──
+  socket.on('state', (s) => {
+    $('status').textContent = s.status;
+    $('status').className = 'value ' + (s.status === 'ONLINE' ? 'status-online' : 'status-offline');
+    $('energy').textContent = s.energy;
+    $('energyBar').style.width = s.energy + '%';
+    $('cycle').textContent = s.cycleTouches + ' / ' + s.threshold;
+    $('total').textContent = s.totalTouches;
+    $('contrib').textContent = s.contribution.toLocaleString();
+  });
+  socket.on('triggerSugar', (d) => log('triggerSugar ' + (d.big ? '★大奖励' : '小'), 'sugar'));
+  socket.on('triggerKnife', (d) => log('triggerKnife 强度=' + d.intensity.toFixed(2), 'knife'));
+  socket.on('systemOffline', (d) => log('■ systemOffline 原因='+d.reason+' 计数停在 '+d.finalContribution.toLocaleString()+'（'+(d.willRecoverInMs/1000)+'秒后恢复）', 'sys'));
+  socket.on('systemOnline', () => log('□ systemOnline 系统恢复，新一轮开始', 'sys'));
+  socket.on('connect', () => log('已连接服务器', 'st'));
+  socket.on('disconnect', () => log('与服务器断开', 'st'));
+</script>
+</body>
+</html>
