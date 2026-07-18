@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+
+  <!-- ==========================================================
+       视口设置：这一行决定手机怎么显示这个页面
+       - width=device-width：宽度贴合手机屏幕
+       - maximum-scale / user-scalable=no：禁止用户双指放大缩小
+       - viewport-fit=cover：让黑色铺满全屏（包括刘海/圆角区域）
+       ========================================================== -->
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, viewport-fit=cover">
+
+  <!-- 让 iPhone「添加到主屏幕」后能全屏运行、隐藏地址栏（展览布置时很有用） -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#000000">
+
+  <title>SWARM</title>
+
+  <style>
+    /* ==========================================================
+       全局：铺满全屏的纯黑触摸区，禁止一切滚动、缩放、选中
+       ========================================================== */
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: #000;           /* 纯黑底 */
+      overflow: hidden;           /* 禁止滚动 */
+      position: fixed;            /* 配合上一行，彻底关掉 iOS 的橡皮筋回弹 */
+      overscroll-behavior: none;  /* 关掉下拉刷新等浏览器手势 */
+      touch-action: none;         /* 关键：告诉浏览器这里不做滚动/缩放手势 */
+      -webkit-user-select: none;  /* 禁止长按选中文字 */
+      user-select: none;
+      -webkit-touch-callout: none;/* 禁止长按弹出「复制/保存」菜单 */
+      -webkit-tap-highlight-color: transparent; /* 去掉点击时的灰色高亮方块 */
+    }
+
+    /* 舞台：所有内容都放在这层上 */
+    #stage {
+      position: fixed;
+      inset: 0;                   /* 上下左右都贴到边 */
+      background: #000;
+      overflow: hidden;
+      /* 冷色调、无衬线的极简字体栈 */
+      font-family: "Helvetica Neue", Arial, "PingFang SC", sans-serif;
+    }
+
+    /* ---------- 中央呼吸光点 + TOUCH 引导 ---------- */
+    #beacon {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 26px;
+      pointer-events: none;       /* 不挡触摸，触摸穿透到底层 */
+      transition: opacity 1.2s ease;
+    }
+    /* 呼吸的小光点 */
+    #dot {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 0 24px 6px rgba(255,255,255,0.55);
+      animation: breathe 3.4s ease-in-out infinite;
+    }
+    @keyframes breathe {
+      0%, 100% { opacity: 0.25; transform: scale(0.85); }
+      50%      { opacity: 0.9;  transform: scale(1.15); }
+    }
+    /* TOUCH 字样：极淡、字距拉开，冷峻 */
+    #hint {
+      color: rgba(255,255,255,0.5);
+      font-size: 13px;
+      letter-spacing: 0.5em;      /* 字距拉开 = 冷感 */
+      padding-left: 0.5em;        /* 补偿字距造成的右偏 */
+      font-weight: 300;
+      transition: opacity 1s ease;
+    }
+
+    /* ---------- 触摸点的即时光反馈（每次触摸生成一个，播完自删） ---------- */
+    .ripple {
+      position: absolute;
+      width: 10px;
+      height: 10px;
+      margin: -5px 0 0 -5px;      /* 让光点中心对准手指 */
+      border-radius: 50%;
+      background: radial-gradient(circle,
+                  rgba(255,255,255,0.95) 0%,
+                  rgba(255,255,255,0.35) 40%,
+                  rgba(255,255,255,0) 70%);
+      pointer-events: none;
+      animation: rippleOut 0.6s ease-out forwards;
+    }
+    @keyframes rippleOut {
+      0%   { transform: scale(0.4); opacity: 1; }
+      100% { transform: scale(9);   opacity: 0; }
+    }
+
+    /* ---------- 奖励闪光层（糖）：铺满全屏的白，平时透明 ---------- */
+    #flash {
+      position: absolute;
+      inset: 0;
+      background: #ffffff;
+      opacity: 0;                 /* 平时看不见 */
+      pointer-events: none;       /* 不挡触摸 */
+    }
+
+    /* ---------- 系统离线遮罩 ---------- */
+    #offline {
+      position: absolute;
+      inset: 0;
+      background: #000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: rgba(255,255,255,0.28);
+      font-size: 14px;
+      letter-spacing: 0.4em;
+      padding-left: 0.4em;
+      font-weight: 300;
+      opacity: 0;                 /* 平时隐藏 */
+      pointer-events: none;       /* 隐藏时不挡触摸 */
+      transition: opacity 0.6s ease;
+      z-index: 10;
+    }
+    #offline.show {
+      opacity: 1;
+      pointer-events: auto;       /* 显示时盖住整个屏幕，吞掉触摸 */
+    }
+
+    /* ---------- 右上角极小的网络连接指示点（不是游戏离线，是网络状态） ---------- */
+    #net {
+      position: absolute;
+      top: calc(env(safe-area-inset-top, 0px) + 12px);
+      right: 14px;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #444;           /* 灰=未连上 */
+      opacity: 0.6;
+      transition: background 0.4s ease;
+      z-index: 11;
+    }
+    #net.connected { background: #3a6;/* 暗绿=已连上服务器 */ }
+  </style>
+</head>
+
+<body>
+  <div id="stage">
+    <!-- 中央引导：呼吸光点 + TOUCH -->
+    <div id="beacon">
+      <div id="dot"></div>
+      <div id="hint">TOUCH</div>
+    </div>
+
+    <!-- 奖励闪光层 -->
+    <div id="flash"></div>
+
+    <!-- 系统离线遮罩 -->
+    <div id="offline">SYSTEM OFFLINE</div>
+
+    <!-- 网络连接指示点 -->
+    <div id="net"></div>
+  </div>
+
+  <!-- ==========================================================
+       Socket.io 客户端：直接从你自己的服务器加载
+       注意：路径就是 /socket.io/socket.io.js，这是 socket.io 服务器
+       自动提供的，不用你自己放这个文件，也不用 CDN。
+       好处：客户端版本一定和服务器一致，不会对不上。
+       前提：这个页面必须由服务器打开（http/https），
+             不能双击文件用 file:// 打开（会报错）。
+       ========================================================== -->
+  <script src="/socket.io/socket.io.js"></script>
+
+  <script>
+    // =========================================================
+    // 1) 抓取页面上的元素，方便后面操作
+    // =========================================================
+    const stage   = document.getElementById('stage');
+    const beacon  = document.getElementById('beacon');
+    const hint    = document.getElementById('hint');
+    const flash   = document.getElementById('flash');
+    const offline = document.getElementById('offline');
+    const net     = document.getElementById('net');
+
+    // 记录「系统是否离线」。离线时触摸不发送、不反馈。
+    let isOffline = false;
+    // 记录是否已经触摸过一次（用来在第一次触摸后淡出 TOUCH 字样）
+    let hasTouched = false;
+
+    // =========================================================
+    // 2) 连接服务器
+    //    io() 不带参数 = 连接「打开这个页面的同一个服务器」。
+    //    因为 phone.html 就放在服务器的 public 文件夹里，所以直接 io() 即可。
+    // =========================================================
+    const socket = io();
+
+    // 连上服务器：右上角指示点变暗绿
+    socket.on('connect', () => {
+      net.classList.add('connected');
+    });
+    // 掉线：指示点变回灰（socket.io 会自动尝试重连，不用管）
+    socket.on('disconnect', () => {
+      net.classList.remove('connected');
+    });
+
+    // =========================================================
+    // 3) 处理触摸：这是整个作品唯一的输入
+    //    每次手指按下 → 算出归一化坐标(0~1) → socket.emit('touch', {x, y})
+    // =========================================================
+    function handleTouchStart(e) {
+      // 阻止浏览器默认行为（避免双击放大、误触等）
+      e.preventDefault();
+
+      // 系统离线时：不发送、不反馈（触摸暂时无效，这是作品的「垮掉」时刻）
+      if (isOffline) return;
+
+      // 第一次触摸后，淡出中央的 TOUCH 引导（光点继续保留）
+      if (!hasTouched) {
+        hasTouched = true;
+        hint.style.opacity = '0';
+      }
+
+      // e.changedTouches 是「这一下新按下的手指」，可能同时多根手指
+      // 我们对每一根手指都算一次坐标、发一次 touch、给一次光反馈
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        const t = e.changedTouches[i];
+
+        // 归一化坐标：把像素位置除以屏幕宽/高，得到 0~1 之间的小数
+        let x = t.clientX / window.innerWidth;
+        let y = t.clientY / window.innerHeight;
+        // 保险起见夹在 0~1 之间
+        x = Math.min(1, Math.max(0, x));
+        y = Math.min(1, Math.max(0, y));
+
+        // ★ 按接口发送：事件名 'touch'，字段 {x, y}（严格照进度文档）
+        socket.emit('touch', { x, y });
+
+        // 本地即时光反馈：在手指位置生成一圈扩散的白光
+        spawnRipple(t.clientX, t.clientY);
+      }
+
+      // 轻微震动，让观众觉得「我的触摸有效」
+      // 注意：iPhone 的 Safari 不支持震动，这行在苹果手机上会自动无效（不会报错）
+      vibrate(15);
+    }
+
+    // 触摸移动/结束也统统阻止默认，防止页面被拖动或缩放
+    function preventDefaultTouch(e) { e.preventDefault(); }
+
+    // 绑定事件。{ passive: false } 是必须的，否则 preventDefault 不生效。
+    stage.addEventListener('touchstart', handleTouchStart, { passive: false });
+    stage.addEventListener('touchmove',  preventDefaultTouch, { passive: false });
+    stage.addEventListener('touchend',   preventDefaultTouch, { passive: false });
+    // iOS 专用：阻止双指缩放手势
+    document.addEventListener('gesturestart', preventDefaultTouch, { passive: false });
+    // 阻止长按弹出的右键菜单
+    document.addEventListener('contextmenu', preventDefaultTouch, { passive: false });
+
+    // =========================================================
+    // 4) 监听服务器广播的 'triggerSugar'（糖=给观众的奖励）
+    //    普通奖励：一次柔和闪光
+    //    payload.big === true：更强的全屏闪光 + 更强震动（变率强化的大奖励）
+    //    big 由服务器决定，客户端不要自己再随机
+    // =========================================================
+    socket.on('triggerSugar', (payload) => {
+      if (isOffline) return; // 离线时不给反馈
+
+      const big = payload && payload.big === true;
+
+      if (big) {
+        // 大奖励：强白闪 + 较长余韵 + 强震动模式
+        doFlash(0.9, 600);
+        vibrate([0, 40, 30, 55]); // 一段有节奏的强震动，像「中奖」
+      } else {
+        // 普通奖励：淡淡一闪
+        doFlash(0.14, 320);
+      }
+    });
+
+    // =========================================================
+    // 5) 监听 'state'（每秒约10次的完整状态快照）
+    //    我们只关心 status：ONLINE / OFFLINE
+    // =========================================================
+    socket.on('state', (s) => {
+      if (!s) return;
+      if (s.status === 'OFFLINE') {
+        setOffline(true);
+      } else if (s.status === 'ONLINE') {
+        setOffline(false);
+      }
+    });
+
+    // 服务器也会单独广播这两个事件，一起监听做双保险
+    socket.on('systemOffline', () => setOffline(true));
+    socket.on('systemOnline',  () => setOffline(false));
+
+    // =========================================================
+    // 6) 一些工具函数
+    // =========================================================
+
+    // 生成一个触摸光点，播完动画自动删除
+    function spawnRipple(px, py) {
+      const r = document.createElement('div');
+      r.className = 'ripple';
+      r.style.left = px + 'px';
+      r.style.top  = py + 'px';
+      stage.appendChild(r);
+      // 动画 0.6s，播完就删掉，避免元素越堆越多
+      r.addEventListener('animationend', () => r.remove());
+    }
+
+    // 全屏闪光。strength=亮度(0~1)，duration=淡出时间(毫秒)
+    function doFlash(strength, duration) {
+      // 先瞬间点亮（关掉过渡）
+      flash.style.transition = 'none';
+      flash.style.opacity = String(strength);
+      // 强制浏览器立刻应用上面的样式（这一行是必须的小技巧）
+      void flash.offsetWidth;
+      // 再用过渡淡回 0
+      flash.style.transition = 'opacity ' + duration + 'ms ease-out';
+      flash.style.opacity = '0';
+    }
+
+    // 震动的安全封装：不支持的手机（如 iPhone）自动跳过，不报错
+    function vibrate(pattern) {
+      if (navigator.vibrate) {
+        try { navigator.vibrate(pattern); } catch (e) {}
+      }
+    }
+
+    // 切换「系统离线」状态
+    function setOffline(off) {
+      if (off === isOffline) return; // 状态没变就不用动
+      isOffline = off;
+      if (off) {
+        offline.classList.add('show');    // 显示 SYSTEM OFFLINE 遮罩
+        beacon.style.opacity = '0';       // 藏起中央光点
+        vibrate(0);                        // 停止可能正在进行的震动
+      } else {
+        offline.classList.remove('show'); // 收起遮罩
+        beacon.style.opacity = '1';       // 恢复中央光点
+        hasTouched = false;               // 新一轮开始，重新显示 TOUCH 引导
+        hint.style.opacity = '';          // 恢复 TOUCH 的默认淡显
+      }
+    }
+
+    // =========================================================
+    // 7) 额外的手机端保险：任何双击都不放大
+    // =========================================================
+    let lastTouchEnd = 0;
+    document.addEventListener('touchend', (e) => {
+      const now = Date.now();
+      if (now - lastTouchEnd <= 300) e.preventDefault(); // 300ms内的第二次点=双击，拦截
+      lastTouchEnd = now;
+    }, { passive: false });
+  </script>
+</body>
+</html>
