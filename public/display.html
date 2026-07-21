@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SWARM · 表演者端</title>
+  <!--
+  ================================================================
+  文件位置：public/display.html
+  必须同时存在：public/sound.js（把 sound.js 也复制进 public/ 文件夹）
+
+  表演者在演出前在自己电脑上打开这个页面。
+  观众用手机打开 phone.html（已部署在 Render 上）。
+  两个页面通过服务器的 Socket.io 通信。
+
+  今天验证用法（单输出临时方案）：
+    摘掉耳机 → 点"START" → 用手机触摸 → 电脑喇叭出声 → 确认糖声
+    戴上耳机 → 直接触发刀声按钮 → 耳机里出声 → 确认刀声
+  ================================================================
+  -->
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #000;
+      color: #fff;
+      font-family: 'Courier New', monospace;
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    /* ── 启动屏 ─────────────────────────── */
+    #start-screen {
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 18px;
+    }
+
+    .start-title {
+      font-size: 11px;
+      letter-spacing: 6px;
+      color: #333;
+    }
+
+    #start-btn {
+      padding: 22px 52px;
+      font-size: 16px;
+      font-family: inherit;
+      letter-spacing: 4px;
+      background: transparent;
+      color: #00ff88;
+      border: 1px solid #00ff88;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    #start-btn:hover { background: rgba(0,255,136,0.08); }
+
+    .start-note {
+      font-size: 10px;
+      color: #333;
+      letter-spacing: 2px;
+      line-height: 1.8;
+    }
+
+    /* ── 主界面 ─────────────────────────── */
+    #main-screen {
+      display: none;            /* 启动后才显示 */
+      width: 100%;
+      height: 100%;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+    }
+
+    /* 系统状态大字（ONLINE / OFFLINE） */
+    #status-label {
+      font-size: 11px;
+      letter-spacing: 5px;
+      color: #333;
+      margin-bottom: 6px;
+    }
+    #status-text {
+      font-size: 52px;
+      font-weight: bold;
+      letter-spacing: 4px;
+      color: #00ff88;
+      transition: color 0.3s;
+    }
+    #status-text.offline { color: #ff2244; }
+
+    /* 能量条 */
+    #energy-bar-wrap {
+      width: 280px;
+      height: 2px;
+      background: #111;
+      margin: 24px 0 6px;
+    }
+    #energy-bar {
+      height: 100%;
+      background: #00ff88;
+      width: 100%;
+      transition: width 0.1s, background 0.3s;
+    }
+    #energy-bar.low { background: #ff6600; }
+    #energy-bar.offline { background: #ff2244; }
+
+    #energy-text {
+      font-size: 10px;
+      color: #444;
+      letter-spacing: 2px;
+    }
+
+    /* 触摸计数 / 进度 */
+    #touch-text {
+      margin-top: 20px;
+      font-size: 10px;
+      color: #333;
+      letter-spacing: 2px;
+    }
+
+    /* 最近一次档位（调试用，演出时可以忽略） */
+    #tier-display {
+      margin-top: 28px;
+      font-size: 11px;
+      letter-spacing: 3px;
+      color: #222;
+      height: 16px;
+      transition: color 0.05s;
+    }
+    #tier-display.flash-small  { color: #00aa66; }
+    #tier-display.flash-medium { color: #00ff88; }
+    #tier-display.flash-big    { color: #ffffff; }
+
+    /* FaceMesh 占位画布 ── Window ② 将来写在这里 */
+    /* 现在这个 canvas 是透明的，不显示任何内容 */
+    #face-canvas {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      pointer-events: none;
+      /* 将来把 display:none 改掉，把 p5/ml5 的 FaceMesh 代码接进来 */
+      display: none;
+    }
+
+    /* 底部调试栏（演出时可用 CSS 隐藏） */
+    #debug-bar {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      padding: 6px 16px;
+      font-size: 10px;
+      color: #1a1a1a;
+      display: flex;
+      gap: 20px;
+      border-top: 1px solid #0a0a0a;
+    }
+
+    /* 手动测试按钮（今天用来验证声音，正式演出可以隐藏） */
+    #test-panel {
+      position: fixed;
+      top: 12px; right: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .test-btn {
+      padding: 6px 12px;
+      font-family: inherit;
+      font-size: 10px;
+      letter-spacing: 1px;
+      background: transparent;
+      border: 1px solid #1a1a1a;
+      color: #333;
+      cursor: pointer;
+    }
+    .test-btn:hover { border-color: #444; color: #666; }
+    .test-btn.sugar { border-color: #004422; color: #00aa66; }
+    .test-btn.knife { border-color: #440011; color: #aa0033; }
+  </style>
+</head>
+<body>
+
+  <!-- ── 启动屏 ───────────────────────── -->
+  <div id="start-screen">
+    <div class="start-title">SWARM · PERFORMER DISPLAY</div>
+    <button id="start-btn">▶ START PERFORMANCE</button>
+    <div class="start-note">
+      点击后：音频引擎启动，运转声开始播放<br>
+      点击前先确认耳机已连接<br>
+      （笔记本现在只有一个声卡，糖声和刀声都从同一输出）
+    </div>
+  </div>
+
+  <!-- ── 主界面（启动后显示）────────── -->
+  <div id="main-screen">
+
+    <!-- FaceMesh 将来叠在这里（Window ②）-->
+    <canvas id="face-canvas"></canvas>
+
+    <!-- 系统状态 -->
+    <div id="status-label">SYSTEM STATUS</div>
+    <div id="status-text">ONLINE</div>
+
+    <!-- 能量条 -->
+    <div id="energy-bar-wrap">
+      <div id="energy-bar"></div>
+    </div>
+    <div id="energy-text">ENERGY 100 / 100</div>
+
+    <!-- 触摸进度 -->
+    <div id="touch-text">TOUCHES 0 / 150</div>
+
+    <!-- 最近档位（调试用） -->
+    <div id="tier-display">—</div>
+
+    <!-- 今天测试用的手动触发按钮（正式演出可以用 CSS 隐藏）-->
+    <div id="test-panel">
+      <div style="font-size:9px;color:#222;letter-spacing:2px;margin-bottom:2px;">测试用</div>
+      <button class="test-btn sugar" onclick="manualSugar('small')">糖 small</button>
+      <button class="test-btn sugar" onclick="manualSugar('medium')">糖 medium</button>
+      <button class="test-btn sugar" onclick="manualSugar('big')">糖 big ★</button>
+      <button class="test-btn knife" onclick="manualKnife('small')">刀 small</button>
+      <button class="test-btn knife" onclick="manualKnife('medium')">刀 medium</button>
+      <button class="test-btn knife" onclick="manualKnife('big')">刀 big ★</button>
+      <button class="test-btn" onclick="SwarmSound.playOffline()">断电</button>
+      <button class="test-btn" onclick="SwarmSound.startAmbient()">运转▶</button>
+      <button class="test-btn" onclick="SwarmSound.stopAmbient()">运转■</button>
+    </div>
+  </div>
+
+  <!-- 底部调试信息 -->
+  <div id="debug-bar">
+    <span id="db-conn">socket: 未连接</span>
+    <span id="db-audio">音频: 未启动</span>
+    <span id="db-contrib">contribution: —</span>
+  </div>
+
+  <!-- ── 依赖加载（顺序不能改）──────── -->
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.7.77/Tone.js"></script>
+  <script src="sound.js"></script>  <!-- 必须和 display.html 在同一个 public/ 文件夹 -->
+
+  <script>
+    /* ============================================================
+       SWARM · display.html 主逻辑
+
+       服务器发出的事件：
+         triggerSugar  { big: bool, x, y }   每次有人触摸
+         triggerKnife  { intensity: 0-1 }     每次有人触摸（同时）
+         systemOffline { reason, ... }        系统崩溃
+         systemOnline  {}                     系统恢复
+         state         { energy, cycleTouches, cycleProgress,
+                         totalTouches, contribution, status,
+                         threshold }          每 100ms 广播
+
+       注意：triggerSugar 和 triggerKnife 是服务器在同一次触摸里
+       连续 emit 的。糖声和刀声都在 triggerSugar 里处理，
+       triggerKnife 直接忽略（避免刀声响两次）。
+       ============================================================ */
+
+    // ── Socket.io 连接 ──────────────────────────────────────────
+    const socket = io('/');
+
+    socket.on('connect', () => {
+      document.getElementById('db-conn').textContent = 'socket: 已连接 ' + socket.id;
+    });
+
+    socket.on('disconnect', () => {
+      document.getElementById('db-conn').textContent = 'socket: 断开';
+    });
+
+
+    // ── 状态同步（能量条、触摸计数、ONLINE/OFFLINE 显示）────────
+    let lastKnownStatus = 'ONLINE'; // 记住最近一次收到的系统状态
+    let lastKnownThreshold = 150;
+
+    socket.on('state', (data) => {
+      lastKnownStatus = data.status;
+      lastKnownThreshold = data.threshold;
+
+      // ONLINE / OFFLINE 大字
+      const statusEl = document.getElementById('status-text');
+      statusEl.textContent = data.status;
+      if (data.status === 'OFFLINE') {
+        statusEl.classList.add('offline');
+      } else {
+        statusEl.classList.remove('offline');
+      }
+
+      // 能量条
+      const barEl = document.getElementById('energy-bar');
+      barEl.style.width = data.energy + '%';
+      barEl.classList.remove('low', 'offline');
+      if (data.status === 'OFFLINE') barEl.classList.add('offline');
+      else if (data.energy < 25)     barEl.classList.add('low');
+      document.getElementById('energy-text').textContent =
+        'ENERGY ' + data.energy + ' / 100';
+
+      // 触摸进度
+      document.getElementById('touch-text').textContent =
+        'TOUCHES ' + data.cycleTouches + ' / ' + data.threshold;
+
+      // 调试栏
+      document.getElementById('db-contrib').textContent =
+        'contribution: ' + data.contribution;
+    });
+
+
+    // ── 触摸事件 → 糖声 + 刀声 ──────────────────────────────────
+    socket.on('triggerSugar', (data) => {
+      // ① pickTier() 负责：推进连击音阶位置 + touchCount++ + 本地掷骰子
+      const localTier = SwarmSound.pickTier();
+
+      // ② 服务器的 big 标志有最终裁量权
+      //    - 服务器说 big → 强制大档（不管本地骰子结果）
+      //    - 服务器说不是 big → 用本地的 small/medium
+      //      （如果本地骰子碰巧说 big，降级为 medium，避免过多大档）
+      let tier;
+      if (data.big) {
+        tier = 'big';
+      } else {
+        tier = (localTier === 'big') ? 'medium' : localTier;
+      }
+
+      // ③ 糖声（音箱）和刀声（耳机）同一个 tier、同一瞬间
+      SwarmSound.playSugar(tier);
+      SwarmSound.playKnife(tier);
+
+      // ④ 档位闪光（调试用）
+      flashTierDisplay(tier);
+    });
+
+    // triggerKnife 是服务器每次触摸同时发出的，
+    // 但我们已经在 triggerSugar 里处理了刀声，所以这里什么都不做
+    socket.on('triggerKnife', () => { /* 忽略，避免刀声响两次 */ });
+
+
+    // ── 系统崩溃 / 恢复 ─────────────────────────────────────────
+    socket.on('systemOffline', () => {
+      SwarmSound.playOffline();   // 断电爆击音
+      SwarmSound.stopAmbient();   // 运转声淡出
+    });
+
+    socket.on('systemOnline', () => {
+      SwarmSound.startAmbient();  // 运转声重新淡入
+    });
+
+
+    // ── 启动按钮 ─────────────────────────────────────────────────
+    document.getElementById('start-btn').addEventListener('click', async () => {
+      document.getElementById('start-btn').textContent = '启动中…';
+      document.getElementById('start-btn').disabled = true;
+
+      try {
+        // 初始化音频引擎（必须在用户点击后调用）
+        await SwarmSound.init();
+
+        // 根据服务器当前状态决定是否立即播放运转声
+        if (lastKnownStatus === 'ONLINE') {
+          SwarmSound.startAmbient();
+        }
+
+        // 切换界面
+        document.getElementById('start-screen').style.display = 'none';
+        document.getElementById('main-screen').style.display  = 'flex';
+        document.getElementById('db-audio').textContent = '音频: 已启动';
+
+      } catch (err) {
+        document.getElementById('start-btn').textContent = '启动失败，刷新重试';
+        document.getElementById('start-btn').disabled = false;
+        console.error('[SWARM] 音频启动失败:', err);
+      }
+    });
+
+
+    // ── 手动测试函数（右上角按钮用，正式演出时可以用 CSS 隐藏按钮）──
+    function manualSugar(tier) {
+      // 不走 pickTier()，直接指定 tier，避免影响连击状态
+      SwarmSound.playSugar(tier);
+      flashTierDisplay(tier);
+    }
+
+    function manualKnife(tier) {
+      SwarmSound.playKnife(tier);
+    }
+
+
+    // ── 档位闪光动画（调试用）────────────────────────────────────
+    function flashTierDisplay(tier) {
+      const el = document.getElementById('tier-display');
+      el.className = '';
+      const label = tier === 'big' ? '★ BIG' : tier === 'medium' ? 'MED' : 'small';
+      el.textContent = label;
+      // 短暂闪一下颜色，然后淡回去
+      setTimeout(() => { el.classList.add('flash-' + tier); }, 0);
+      setTimeout(() => { el.className = ''; }, 600);
+    }
+  </script>
+
+</body>
+</html>
