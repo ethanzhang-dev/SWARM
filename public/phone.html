@@ -227,7 +227,7 @@
     socket.on('triggerSugar', payload => {
       if (isOffline) return;
 
-      const big = payload && payload.big === true;
+      const big = payload && payload.tier === 'large';
 
       if (big) {
         // 大奖励：在屏幕中心爆发一个更大的光晕 + 强节奏震动
