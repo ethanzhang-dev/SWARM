@@ -1,250 +1,153 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <title>SWARM</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SWARM · 屏幕端</title>
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      background: #000;
-      overflow: hidden;
-      font-family: monospace;
-      color: #fff;
-      width: 100vw;
-      height: 100vh;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-    }
-
-    #join-screen {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      gap: 20px;
-    }
-
-    #join-btn {
-      padding: 30px 50px;
-      font-size: 24px;
-      font-family: monospace;
-      font-weight: bold;
-      background: #00ff88;
-      color: #000;
-      border: none;
-      border-radius: 6px;
-      cursor: pointer;
-      -webkit-tap-highlight-color: transparent;
-      touch-action: manipulation;
-      position: relative;
-      z-index: 100;
-    }
-
-    #join-label {
-      color: #00ff88;
-      font-size: 14px;
-      letter-spacing: 2px;
-    }
-
-    #game-screen {
-      display: none;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      width: 100%;
-      height: 100%;
-      gap: 16px;
-    }
-
-    #role-label {
-      font-size: 13px;
-      letter-spacing: 3px;
-      opacity: 0.6;
-    }
-
-    #role-name {
-      font-size: 32px;
-      font-weight: bold;
-      letter-spacing: 2px;
-    }
-
-    #role-instruction {
-      font-size: 16px;
-      opacity: 0.7;
-      letter-spacing: 1px;
-    }
-
-    #role-note {
-      font-size: 11px;
-      letter-spacing: 3px;
-      opacity: 0.45;
-      margin-top: 8px;
-    }
-
-    #intensity-val {
-      font-size: 13px;
-      opacity: 0.4;
-      margin-top: 8px;
-    }
-
-    #bar-container {
-      position: fixed;
-      bottom: 0;
-      left: 0;
-      width: 100%;
-      height: 0%;
-      transition: height 0.05s;
-      opacity: 0.3;
-    }
-
-    #waiting-screen {
-      display: none;
-      flex-direction: column;
-      align-items: center;
-      gap: 12px;
-    }
-
-    #waiting-screen p {
-      color: #00cc66;
-      font-size: 16px;
-      letter-spacing: 2px;
-    }
-
-    #waiting-screen small {
-      color: #006633;
-      font-size: 12px;
-    }
+    /* 全黑背景、无滚动条、画布居中 */
+    * { margin: 0; padding: 0; }
+    html, body { background: #000; overflow: hidden; width: 100%; height: 100%; }
+    canvas { display: block; }
   </style>
 </head>
 <body>
 
-  <!-- join screen -->
-  <div id="join-screen">
-    <div id="join-label">SWARM</div>
-    <button id="join-btn">ENTER THE SWARM</button>
-  </div>
+  <!--
+    ★ 脚本引入顺序（不能乱！）：
+    ① socket.io  —— 网络通信
+    ② p5.js      —— 绘图框架
+    ③ ml5.js     —— 人脸检测（占位阶段可先不加，等你搬视觉代码时再启用）
+    ④ sound.js   —— 你的四音色模块（对外暴露 playSugar / playKnife / startAmbient / stopAmbient / playOffline）
+    ⑤ swarm-net.js —— 整合层（网络 + 闪亮 + 消退 + OFFLINE）
+    ⑥ 最后才是画面代码（下面的 <script> 块）
+  -->
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+  <!-- <script src="https://unpkg.com/ml5@1/dist/ml5.min.js"></script> --><!-- 搬视觉代码时取消这行注释 -->
+  <script src="sound.js"></script>
+  <script src="swarm-net.js"></script>
 
-  <!-- waiting for role assignment -->
-  <div id="waiting-screen">
-    <p>YOU ARE IN</p>
-    <small>STAND BY FOR YOUR ROLE</small>
-  </div>
-
-  <!-- game screen -->
-  <div id="game-screen">
-    <div id="bar-container"></div>
-    <div id="role-label">YOUR ROLE</div>
-    <div id="role-name">--</div>
-    <div id="role-instruction">SHAKE IT</div>
-    <div id="role-note">YOU DID NOT CHOOSE THIS</div>
-    <div id="intensity-val">0</div>
-  </div>
-
-  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
   <script>
-    const ROLE_NAMES = ["01 PULSE","02 RIFT","03 VOID","04 GLITCH","05 SURGE"];
-    const ROLE_COLORS = [
-      "#00ffb4",
-      "#ff6400",
-      "#5000ff",
-      "#ff0050",
-      "#ffdc00",
-    ];
-    const ROLE_INSTRUCTIONS = [
-      "YOU ARE THE BEAT",
-      "YOU ARE THE SOUND",
-      "YOU ARE THE DARK",
-      "YOU ARE THE BREAK",
-      "YOU ARE THE SURGE",
-    ];
+    // ========================================================================
+    // SWARM · 屏幕端主程序
+    // ========================================================================
+    // 这个文件的结构：
+    //   setup()  → 初始化画布 + 连接服务器
+    //   draw()   → 每帧：更新状态 → 画面 → OFFLINE覆盖层
+    //
+    // 你的视觉代码搬进来时，只动 ★占位视觉★ 那一段，其他都不用碰。
+    // ========================================================================
 
-    let myRole = -1;
-    let smoothedShake = 0;
-    let isConnected = false;
 
-    const socket = io("/");
+    function setup() {
+      createCanvas(windowWidth, windowHeight);
+      pixelDensity(1);  // 关掉高分屏的2倍渲染，帧率提升最明显的一行
 
-    socket.on('connect', () => {
-      console.log('socket connected:', socket.id);
-    });
+      // ── 连接服务器（必须在 setup 最后调用）──
+      swarmConnect();
 
-    // role is now assigned by the server the moment the phone connects
-    socket.on('roleAssigned', (data) => {
-      myRole = data.role;
-      document.getElementById('waiting-screen').style.display = 'none';
-      applyRole(myRole);
-    });
-
-    function applyRole(role) {
-      document.getElementById('game-screen').style.display = 'flex';
-      let c = ROLE_COLORS[role] || '#ffffff';
-      document.getElementById('role-name').innerText  = ROLE_NAMES[role]        || '--';
-      document.getElementById('role-name').style.color        = c;
-      document.getElementById('role-instruction').innerText   = ROLE_INSTRUCTIONS[role] || 'SHAKE';
-      document.getElementById('role-instruction').style.color = c;
-      document.getElementById('role-label').style.color       = c;
-      document.getElementById('role-note').style.color        = c;
-      document.getElementById('bar-container').style.background = c;
+      console.log('[屏幕] setup 完成，等待触摸...');
     }
 
-    document.getElementById('join-btn').addEventListener('click', function() {
-      if (typeof DeviceMotionEvent !== 'undefined' &&
-          typeof DeviceMotionEvent.requestPermission === 'function') {
-        DeviceMotionEvent.requestPermission()
-          .then(state => {
-            if (state === 'granted') startSensors();
-            else alert('Please allow motion access to participate.');
-          })
-          .catch(err => {
-            console.error(err);
-            startSensors();
-          });
-      } else {
-        startSensors();
-      }
-    });
 
-    function startSensors() {
-      document.getElementById('join-screen').style.display   = 'none';
-      document.getElementById('waiting-screen').style.display = 'flex';
-      isConnected = true;
-      startSendLoop();
+    function draw() {
+      // ── 第一行：更新闪亮衰减 + 无人触摸消退 ──
+      swarmUpdate();
+
+      // ── 画面 ──
+      background(0);
+
+      // ═══════════════════════════════════════════════════════════════════
+      // ★★★ 占位视觉 · 开始 ★★★
+      // 整合跑通后，把这一段（到"占位视觉·结束"之间）替换成你②号窗口的
+      // FaceMesh 三层绘制代码（底层视频 + 中层网格 + 顶层单线肖像）。
+      // 替换时记住两件事：
+      //   1. 画线描的透明度用 swarmLineAlpha(你原来的值)
+      //   2. 画视频的透明度用 swarmVideoAlpha(你原来的值)
+      // ═══════════════════════════════════════════════════════════════════
+
+      // 占位：一个会呼吸的圆，用来验证闪亮 / 消退 / OFFLINE 整条回路
+      drawPlaceholderVisual();
+
+      // ═══════════════════════════════════════════════════════════════════
+      // ★★★ 占位视觉 · 结束 ★★★
+      // ═══════════════════════════════════════════════════════════════════
+
+
+      // ── 调试信息（左上角，整合通过后可删掉）──
+      drawDebugInfo();
+
+      // ── 最后一行：OFFLINE 时盖黑屏 + 文字 ──
+      swarmDrawOverlay();
     }
 
-    let accX = 0, accY = 0, accZ = 0;
 
-    window.addEventListener('devicemotion', (e) => {
-      if (e.accelerationIncludingGravity) {
-        accX = e.accelerationIncludingGravity.x || 0;
-        accY = e.accelerationIncludingGravity.y || 0;
-        accZ = e.accelerationIncludingGravity.z || 0;
+    // ── 占位视觉：一个圆，演示闪亮和消退 ──────────────────────────────────
+    function drawPlaceholderVisual() {
+      push();
+      noFill();
+
+      // 外圈（模拟你的线描）：用 swarmLineAlpha() 控制亮度
+      // 触摸时会闪亮（跳到高亮再衰减）、长时间没人摸会消退
+      let alpha = swarmLineAlpha(180);
+      stroke(255, alpha);
+      strokeWeight(2);
+      let r = min(width, height) * 0.35;
+      ellipse(width / 2, height / 2, r, r);
+
+      // 内圈（模拟你的视频层）：用 swarmVideoAlpha() 控制亮度
+      let vAlpha = swarmVideoAlpha(120);
+      stroke(100, 200, 255, vAlpha);
+      strokeWeight(1);
+      let r2 = r * 0.6;
+      ellipse(width / 2, height / 2, r2, r2);
+
+      // 闪亮光晕效果（触摸瞬间出现，快速衰减）
+      if (SWARM.flashIntensity > 0.01) {
+        let flashAlpha = SWARM.flashIntensity * 200;
+        stroke(255, flashAlpha);
+        strokeWeight(SWARM.flashIntensity * 6);
+        let flashR = r * (1 + SWARM.flashIntensity * 0.15);
+        ellipse(width / 2, height / 2, flashR, flashR);
       }
-    });
 
-    function startSendLoop() {
-      setInterval(() => {
-        if (!isConnected) return;
+      pop();
+    }
 
-        let rawShake = Math.abs(accX) + Math.abs(accY) + Math.abs(accZ);
-        smoothedShake = smoothedShake * 0.75 + rawShake * 0.25;
-        let val = Math.min(smoothedShake, 180);
 
-        // send shake data — role is included so p5.js knows who is shaking
-        socket.emit('shake', { id: socket.id, val: val, role: myRole });
+    // ── 调试信息：左上角显示状态（确认整合通过后可删掉）──────────────────
+    function drawDebugInfo() {
+      push();
+      noStroke();
+      textFont('monospace');
+      textSize(13);
+      textAlign(LEFT, TOP);
+      fill(80);
 
-        if (myRole >= 0) {
-          let pct = (val / 180) * 100;
-          document.getElementById('bar-container').style.height = pct + '%';
-          document.getElementById('intensity-val').innerText = Math.round(val);
-          let bg = Math.round(val / 180 * 30);
-          document.body.style.background = `rgb(${bg},${bg},${bg})`;
-        }
-      }, 30);
+      let s = SWARM.state;
+      let lines = [
+        'FPS: ' + nf(frameRate(), 0, 0),
+        '连接: ' + (SWARM.connected ? 'YES' : 'NO'),
+        '状态: ' + SWARM.status,
+        '能量: ' + s.energy,
+        '本轮触摸: ' + s.cycleTouches + ' / ' + s.threshold,
+        '贡献计数: ' + s.contribution,
+        'flash: ' + nf(SWARM.flashIntensity, 0, 2),
+        'fade: ' + nf(SWARM.fade, 0, 2),
+      ];
+      for (let i = 0; i < lines.length; i++) {
+        text(lines[i], 12, 12 + i * 18);
+      }
+      pop();
+    }
+
+
+    // ── 窗口大小变化时自适应 ──
+    function windowResized() {
+      resizeCanvas(windowWidth, windowHeight);
     }
   </script>
+
 </body>
 </html>
