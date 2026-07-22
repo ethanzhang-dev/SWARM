@@ -71,7 +71,7 @@
     $('contrib').textContent = s.contribution.toLocaleString();
   });
   socket.on('triggerSugar', (d) => log('triggerSugar ' + (d.big ? '★大奖励' : '小'), 'sugar'));
-  socket.on('triggerKnife', (d) => log('triggerKnife 强度=' + d.intensity.toFixed(2), 'knife'));
+  socket.on('triggerKnife', (d) => log('triggerKnife tier=' + d.tier + ' progress=' + (d.progress||0).toFixed(2), 'knife'));
   socket.on('systemOffline', (d) => log('■ systemOffline 原因='+d.reason+' 计数停在 '+d.finalContribution.toLocaleString()+'（'+(d.willRecoverInMs/1000)+'秒后恢复）', 'sys'));
   socket.on('systemOnline', () => log('□ systemOnline 系统恢复，新一轮开始', 'sys'));
   socket.on('connect', () => log('已连接服务器', 'st'));
