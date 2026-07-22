@@ -5,126 +5,120 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SWARM · 屏幕端</title>
   <style>
-    /* 全黑背景、无滚动条、画布居中 */
     * { margin: 0; padding: 0; }
     html, body { background: #000; overflow: hidden; width: 100%; height: 100%; }
     canvas { display: block; }
+
+    /* 启动覆盖层：表演开始前的全屏按钮 */
+    #start-overlay {
+      position: fixed; inset: 0; z-index: 999;
+      background: #000;
+      display: flex; align-items: center; justify-content: center;
+    }
+    #start-btn {
+      font-family: monospace; font-size: 18px; font-weight: bold;
+      letter-spacing: 4px; color: #fff;
+      background: transparent; border: 1px solid #444;
+      padding: 20px 48px; cursor: pointer;
+      transition: border-color 0.2s;
+    }
+    #start-btn:hover { border-color: #fff; }
   </style>
 </head>
 <body>
 
+  <!-- 启动覆盖层：点击后初始化音频 + 连接服务器，然后消失 -->
+  <div id="start-overlay">
+    <button id="start-btn">BEGIN</button>
+  </div>
+
   <!--
-    ★ 脚本引入顺序（不能乱！）：
-    ① socket.io  —— 网络通信
-    ② p5.js      —— 绘图框架
-    ③ ml5.js     —— 人脸检测（占位阶段可先不加，等你搬视觉代码时再启用）
-    ④ sound.js   —— 你的四音色模块（对外暴露 playSugar / playKnife / startAmbient / stopAmbient / playOffline）
-    ⑤ swarm-net.js —— 整合层（网络 + 闪亮 + 消退 + OFFLINE）
-    ⑥ 最后才是画面代码（下面的 <script> 块）
+    ★ 脚本引入顺序（不能乱）：
+    ① Tone.js       —— sound.js 依赖它，必须最先
+    ② p5.js         —— 绘图框架
+    ③ sound.js      —— 你的四音色模块（暴露 SwarmSound 对象）
+    ④ swarm-net.js  —— 整合层（网络+闪亮+消退+OFFLINE）
+    ⑤ 画面代码（下面的 <script> 块）
   -->
-  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.7.77/Tone.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
-  <!-- <script src="https://unpkg.com/ml5@1/dist/ml5.min.js"></script> --><!-- 搬视觉代码时取消这行注释 -->
+  <!-- <script src="https://unpkg.com/ml5@1/dist/ml5.min.js"></script> -->
   <script src="sound.js"></script>
   <script src="swarm-net.js"></script>
 
   <script>
-    // ========================================================================
-    // SWARM · 屏幕端主程序
-    // ========================================================================
-    // 这个文件的结构：
-    //   setup()  → 初始化画布 + 连接服务器
-    //   draw()   → 每帧：更新状态 → 画面 → OFFLINE覆盖层
-    //
-    // 你的视觉代码搬进来时，只动 ★占位视觉★ 那一段，其他都不用碰。
-    // ========================================================================
+    // ── 启动按钮：点击后初始化音频 + 连接服务器 ──────────────────────────
+    document.getElementById('start-btn').addEventListener('click', async function () {
+      this.textContent = 'INITIALIZING...';
+      this.disabled = true;
+      await swarmInit(); // 音频初始化 + 连接服务器（必须在用户手势里）
+      document.getElementById('start-overlay').style.display = 'none';
+    });
 
+    // ========================================================================
+    // p5.js 画面代码
+    // ========================================================================
 
     function setup() {
       createCanvas(windowWidth, windowHeight);
-      pixelDensity(1);  // 关掉高分屏的2倍渲染，帧率提升最明显的一行
-
-      // ── 连接服务器（必须在 setup 最后调用）──
-      swarmConnect();
-
-      console.log('[屏幕] setup 完成，等待触摸...');
+      pixelDensity(1); // 关掉高分屏2倍渲染，帧率提升最明显的一行
+      console.log('[屏幕] setup 完成，等待点击 BEGIN...');
     }
 
-
     function draw() {
-      // ── 第一行：更新闪亮衰减 + 无人触摸消退 ──
+      // ── 第一行：更新闪亮衰减 + 消退 ──
       swarmUpdate();
 
-      // ── 画面 ──
       background(0);
 
       // ═══════════════════════════════════════════════════════════════════
       // ★★★ 占位视觉 · 开始 ★★★
-      // 整合跑通后，把这一段（到"占位视觉·结束"之间）替换成你②号窗口的
-      // FaceMesh 三层绘制代码（底层视频 + 中层网格 + 顶层单线肖像）。
-      // 替换时记住两件事：
-      //   1. 画线描的透明度用 swarmLineAlpha(你原来的值)
-      //   2. 画视频的透明度用 swarmVideoAlpha(你原来的值)
+      // 整合跑通后，把下面这一行换成你的 FaceMesh 三层绘制代码。
+      // 画线描时用 swarmLineAlpha(你的值)，画视频时用 swarmVideoAlpha(你的值)。
       // ═══════════════════════════════════════════════════════════════════
 
-      // 占位：一个会呼吸的圆，用来验证闪亮 / 消退 / OFFLINE 整条回路
       drawPlaceholderVisual();
 
       // ═══════════════════════════════════════════════════════════════════
       // ★★★ 占位视觉 · 结束 ★★★
       // ═══════════════════════════════════════════════════════════════════
 
-
-      // ── 调试信息（左上角，整合通过后可删掉）──
       drawDebugInfo();
 
-      // ── 最后一行：OFFLINE 时盖黑屏 + 文字 ──
+      // ── 最后一行：OFFLINE 时盖黑屏 ──
       swarmDrawOverlay();
     }
 
-
-    // ── 占位视觉：一个圆，演示闪亮和消退 ──────────────────────────────────
+    // ── 占位视觉：一个圆，演示闪亮和消退 ────────────────────────────────
     function drawPlaceholderVisual() {
       push();
       noFill();
 
-      // 外圈（模拟你的线描）：用 swarmLineAlpha() 控制亮度
-      // 触摸时会闪亮（跳到高亮再衰减）、长时间没人摸会消退
-      let alpha = swarmLineAlpha(180);
-      stroke(255, alpha);
+      // 外圈（模拟线描）：swarmLineAlpha 控制亮度——触摸时亮、无人时暗
+      stroke(255, swarmLineAlpha(180));
       strokeWeight(2);
       let r = min(width, height) * 0.35;
       ellipse(width / 2, height / 2, r, r);
 
-      // 内圈（模拟你的视频层）：用 swarmVideoAlpha() 控制亮度
-      let vAlpha = swarmVideoAlpha(120);
-      stroke(100, 200, 255, vAlpha);
+      // 内圈（模拟视频层）：swarmVideoAlpha 只跟消退走、不参与闪亮
+      stroke(100, 200, 255, swarmVideoAlpha(120));
       strokeWeight(1);
-      let r2 = r * 0.6;
-      ellipse(width / 2, height / 2, r2, r2);
+      ellipse(width / 2, height / 2, r * 0.6, r * 0.6);
 
-      // 闪亮光晕效果（触摸瞬间出现，快速衰减）
+      // 闪亮光晕（触摸瞬间出现，快速消失）
       if (SWARM.flashIntensity > 0.01) {
-        let flashAlpha = SWARM.flashIntensity * 200;
-        stroke(255, flashAlpha);
+        stroke(255, SWARM.flashIntensity * 200);
         strokeWeight(SWARM.flashIntensity * 6);
-        let flashR = r * (1 + SWARM.flashIntensity * 0.15);
-        ellipse(width / 2, height / 2, flashR, flashR);
+        ellipse(width / 2, height / 2, r * (1 + SWARM.flashIntensity * 0.15), r * (1 + SWARM.flashIntensity * 0.15));
       }
-
       pop();
     }
 
-
-    // ── 调试信息：左上角显示状态（确认整合通过后可删掉）──────────────────
+    // ── 调试信息（跑通后可删）────────────────────────────────────────────
     function drawDebugInfo() {
       push();
-      noStroke();
-      textFont('monospace');
-      textSize(13);
-      textAlign(LEFT, TOP);
-      fill(80);
-
+      noStroke(); fill(80);
+      textFont('monospace'); textSize(13); textAlign(LEFT, TOP);
       let s = SWARM.state;
       let lines = [
         'FPS: ' + nf(frameRate(), 0, 0),
@@ -134,19 +128,13 @@
         '本轮触摸: ' + s.cycleTouches + ' / ' + s.threshold,
         '贡献计数: ' + s.contribution,
         'flash: ' + nf(SWARM.flashIntensity, 0, 2),
-        'fade: ' + nf(SWARM.fade, 0, 2),
+        'fade:  ' + nf(SWARM.fade, 0, 2),
       ];
-      for (let i = 0; i < lines.length; i++) {
-        text(lines[i], 12, 12 + i * 18);
-      }
+      for (let i = 0; i < lines.length; i++) text(lines[i], 12, 12 + i * 18);
       pop();
     }
 
-
-    // ── 窗口大小变化时自适应 ──
-    function windowResized() {
-      resizeCanvas(windowWidth, windowHeight);
-    }
+    function windowResized() { resizeCanvas(windowWidth, windowHeight); }
   </script>
 
 </body>
