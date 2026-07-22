@@ -60,14 +60,14 @@ let recovering = false; // 防止重复安排恢复定时器
 
 
 // ── 掷一次骰子，决定这次触摸的档位 ──────────────────────────────────────────
-// 返回 { tier: 'small'|'medium'|'large', level: 1|2|3 }
+// 返回 { tier: 'small'/'medium'/'big', level: 1|2|3 }
 // 同时给字符串和数字两种形式，是为了适配你 sound.js 的写法——
 // 你的 playSugar(tier) 若接收字符串就用 tier，若接收数字就用 level。
 function rollTier() {
   const r = Math.random();
   if (r < CONFIG.TIER_SMALL) return { tier: 'small', level: 1 };
   if (r < CONFIG.TIER_SMALL + CONFIG.TIER_MEDIUM) return { tier: 'medium', level: 2 };
-  return { tier: 'large', level: 3 };
+  return { tier: 'big', level: 3 };
 }
 
 
