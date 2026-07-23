@@ -209,6 +209,8 @@ let glowSlider;           // 辉光强度（0-100，默认25）——还没锁�
 // ══════════════════════════════════════════════════════════════════════
 
 let energy = 100;                  // 当前能量值，0-100
+let cycleProgress = 0;             // 本轮触摸进度 0-1（=cycleTouches/threshold），server广播
+                                    // 驱动"过度使用"路径的chaos预警，见getStageParams()
 let lastEnergyActionTime = 0;      // 上次"触摸"或手动设置能量的时间戳（用来判断"多久没摸了"）
 const ENERGY_REGEN_DELAY_MS = 600; // 停止触摸超过这么久，才开始被动回升
 const ENERGY_REGEN_PER_SEC  = 8;   // 回升速度：每秒回升多少点（本地模拟用，server接入后这个值可能被替代）
@@ -341,6 +343,10 @@ let prevStatus = null;
 // ★ 服务器每秒约推10次 state，直接覆盖本地 energy 变量
 swarmSocket.on('state', (s) => {
   energy = s.energy;
+  cycleProgress = s.cycleProgress || 0;   // ★ 读取"过度使用"进度，驱动隐形的第二条chaos路径
+  // ★ 顺手修一个小问题：之前只有onTouch()/回升逻辑会同步滑块显示，
+  // 服务器直接赋值energy时滑块没跟着更新，导致面板数字和实际chaos对不上
+  if (energySlider) energySlider.value(floor(energy));
 
   // ★★★ 用 totalTouches 的变化侦测"发生了一次触摸"，代替等不到的triggerSugar
   // totalTouches 只增不减（不像cycleTouches会在一轮结束时归零），拿来对比最安全
@@ -361,6 +367,7 @@ swarmSocket.on('state', (s) => {
   // ★ 调试用：现在先不节流，方便你做"摸一次看energy变化"的对照测试
   // 测试完确认没问题后，可以把下面这行改回 if(frameCount % 30 === 0){...} 避免刷屏
   console.log('[SWARM][state] energy=' + s.energy +
+              '  cycleProgress=' + (s.cycleProgress||0).toFixed(2) +
               '  totalTouches=' + s.totalTouches +
               '  status=' + s.status);
 });
@@ -828,7 +835,7 @@ function draw(){
   // ══════════════════════════════════════════════════════════════════
 
   // 根据当前energy值，算出这一帧三层视觉该用的参数
-  let stage = getStageParams(energy);
+  let stage = getStageParams(energy, cycleProgress);
   // stage.videoAlpha : 视频层透明度（阶段1恒定80，阶段2滑向20）
   // stage.chaos      : 0-1，阶段2的"衰竭强度"，驱动线漂移/网格断连/flash频闪
 
@@ -924,27 +931,49 @@ function draw(){
 // ══════════════════════════════════════════════════════════════════════
 
 
+// ── 开关：要不要显现"过度使用"这条死法的预警 ──────────────────────────
+// true  = 疯狂戳手机也会让脸开始不稳（更贴近"维持即抽干"，观众能看到代价）
+// false = 这条路完全无预警，energy一直健康，第150次触摸时画面毫无征兆地猝死
+const SHOW_OVERUSE_WARNING = true;
+
 // ── getStageParams() ──────────────────────────────────────────────────
-// 输入当前energy，返回这一帧三层视觉该用的参数。
-// 这是整个三阶段机制的"翻译表"——energy这一个数字，翻译成好几个
-// 具体的视觉参数（视频透明度、混乱强度）。
+// 输入当前energy和cycleProgress，返回这一帧三层视觉该用的参数。
+//
+// server.js 里有两条通向 OFFLINE 的路，读了 server.js 才发现的：
+//   ① energy归零（ENERGY_DECAY_PER_SEC=4，不摸自动衰减）——"被冷落死"
+//   ② cycleTouches达到OFFLINE_TOUCH_THRESHOLD=150（不管energy多高）——"被摸死"
+// 路①本来就在这个函数里（energy驱动的chaos）。
+// 路②之前完全没接——因为每次触摸energy+6，只摸不停手时energy会一直健康，
+// 但cycleProgress（=cycleTouches/threshold，服务器已经算好广播出来了）
+// 在观众看不见的地方悄悄爬向1.0。这就是"观众以为在维持、其实在抽干"
+// 真正发生的地方——之前这条路在屏幕上完全不可见。
 //
 //   energy ∈ [50,100] → 阶段1：videoAlpha恒定80，chaos=0（完全精准）
 //   energy ∈ [10,50)  → 阶段2：videoAlpha从80线性滑向20，chaos从0升到1
 //   energy ∈ [0,10)   → 阶段2末尾的最大衰竭状态，维持到energy=0触发OFFLINE
-function getStageParams(e){
-  let videoAlpha, chaos;
+//   （以上不变）
+//   cycleProgress ∈ [0.6,1.0] → 如果开关打开，额外叠加一条独立的chaos来源，
+//     从60%阈值处开始出现迹象，到100%（第150次触摸）时=最大混乱
+//   两条chaos来源取较大值——不管哪条路先到，视觉都跟着最严重的那条走
+function getStageParams(e, cycleProgress){
+  let videoAlpha, chaosFromNeglect;
   if(e >= 50){
-    videoAlpha = LOCKED_VIDEO_ALPHA_S1;      // 80，恒定
-    chaos = 0;
+    videoAlpha = LOCKED_VIDEO_ALPHA_S1;
+    chaosFromNeglect = 0;
   }else if(e >= 10){
     videoAlpha = map(e, 50, 10, LOCKED_VIDEO_ALPHA_S1, LOCKED_VIDEO_ALPHA_S2_FLOOR);
-    chaos = map(e, 50, 10, 0, 1);
+    chaosFromNeglect = map(e, 50, 10, 0, 1);
   }else{
-    // energy 10以下：保持阶段2末尾的最大衰竭状态，直到0触发OFFLINE
-    videoAlpha = LOCKED_VIDEO_ALPHA_S2_FLOOR; // 20
-    chaos = 1;
+    videoAlpha = LOCKED_VIDEO_ALPHA_S2_FLOOR;
+    chaosFromNeglect = 1;
   }
+
+  let chaosFromOveruse = 0;
+  if(SHOW_OVERUSE_WARNING && cycleProgress){
+    chaosFromOveruse = constrain(map(cycleProgress, 0.6, 1.0, 0, 1), 0, 1);
+  }
+
+  let chaos = max(chaosFromNeglect, chaosFromOveruse);
   return { videoAlpha, chaos };
 }
 
@@ -1404,8 +1433,8 @@ function drawFace(chaos){
 
   // 耳朵、头发：不受chaos影响，始终精准（简化设计，见函数顶部说明）
   if(SHOW_EARS){
-    polys.push({ poly: earPoly(234,false), w: LINE_W*0.85, seed: 610 });
-    polys.push({ poly: earPoly(454,true),  w: LINE_W*0.85, seed: 640 });
+    polys.push({ poly: earPoly(234,false,chaos), w: LINE_W*0.85, seed: 610 });
+    polys.push({ poly: earPoly(454,true,chaos),  w: LINE_W*0.85, seed: 640 });
   }
   if(SHOW_HAIR){
     let hs = hairPolys();
@@ -1452,8 +1481,14 @@ function drawFace(chaos){
 //  尺寸只有 earScale 的 0.1~0.3，是贴着脸的，不是飘在外面的大弧。
 // ══════════════════════════════════════════════════════════════════════
 
-function earPoly(idx, isRight){
-  let p = pt(idx), chin = pt(152), top = pt(10);
+function earPoly(idx, isRight, chaos=0){
+  // ★ 修复"耳朵掉了"：之前耳朵永远用 pt()（精准位置），
+  // 但阶段2时脸部轮廓用 ptDrift() 在漂移——脸飘走了耳朵没跟着飘，
+  // chaos很大时两者分离，看起来就像耳朵掉下来了。
+  // 现在耳朵的锚点也用同一套漂移，chaos=0时和之前完全一样。
+  let p    = chaos > 0 ? ptDrift(idx, chaos) : pt(idx);
+  let chin = chaos > 0 ? ptDrift(152, chaos) : pt(152);
+  let top  = chaos > 0 ? ptDrift(10,  chaos) : pt(10);
 
   // 「往外」= 从画面中心指向锚点
   let ox = p.x - width/2, oy = p.y - height/2;
@@ -1466,13 +1501,6 @@ function earPoly(idx, isRight){
   let nx = px2/fl, ny = py2/fl;
 
   // ★ 耳朵尺寸 = 屏幕上的实际脸高 × 比例
-  //
-  // 之前的写法 (105 * autoZoom) 是错的，而且是【反向】错的：
-  // autoZoom 和脸的大小成反比 —— 脸靠近变大时，autoZoom 会自动变小，
-  // 于是脸在变大、耳朵却在变小。所以看起来才那么怪。
-  //
-  // 正确做法：直接量屏幕上额头到下巴的距离。
-  // pt() 已经把收缩和缩放都算进去了，所以这个值天然和脸等比。
   let faceH = dist(top.x, top.y, chin.x, chin.y);
   let S = faceH * 0.42;
 
@@ -1580,6 +1608,7 @@ function drawHUD(stage){
   text("ENERGY " + energy.toFixed(1) + "  " + stageLabel, 18, 146);
   fill(140); textSize(10);
   let chaosStr = stage ? "  chaos=" + stage.chaos.toFixed(2) : "";
+  chaosStr += "  cycleProg=" + cycleProgress.toFixed(2);
   text("state=" + systemState + chaosStr + "  flash=" + flashIntensity.toFixed(2), 18, 163);
 
   fill(0,0,0,175); rect(10, height-90, width-20, 80, 3);
