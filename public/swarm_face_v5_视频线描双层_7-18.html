@@ -332,30 +332,68 @@ let sugarFlashPulse = 0;
 swarmSocket.on('connect',    () => { swarmConnected = true;  console.log('[SWARM] 已连接服务器'); });
 swarmSocket.on('disconnect', () => { swarmConnected = false; console.log('[SWARM] 与服务器断开'); });
 
+// ★ 用来对比"上一次state"和"这一次state"，从数值变化里推断发生了什么
+// 因为 Console 已经证实：服务器只广播 state，没有单独发
+// triggerSugar / systemOffline / systemOnline 给这个页面
+let prevTotalTouches = null;
+let prevStatus = null;
+
 // ★ 服务器每秒约推10次 state，直接覆盖本地 energy 变量
 swarmSocket.on('state', (s) => {
   energy = s.energy;
+
+  // ★★★ 用 totalTouches 的变化侦测"发生了一次触摸"，代替等不到的triggerSugar
+  // totalTouches 只增不减（不像cycleTouches会在一轮结束时归零），拿来对比最安全
+  if (prevTotalTouches !== null && s.totalTouches > prevTotalTouches) {
+    sugarFlashPulse = 1;   // 触发一次 flash，效果和收到 triggerSugar 一样
+  }
+  prevTotalTouches = s.totalTouches;
+
+  // ★★★ 用 status 字段的变化侦测 OFFLINE / ONLINE，代替等不到的专门事件
+  if (s.status === 'OFFLINE' && prevStatus !== 'OFFLINE') {
+    energy = 0;   // 交给你已有的状态机：captureFrozenFrame → FREEZING → OFFLINE
+  }
+  if (s.status === 'ONLINE' && prevStatus === 'OFFLINE') {
+    setSystemOnline();
+  }
+  prevStatus = s.status;
+
+  // ★ 调试用：现在先不节流，方便你做"摸一次看energy变化"的对照测试
+  // 测试完确认没问题后，可以把下面这行改回 if(frameCount % 30 === 0){...} 避免刷屏
+  console.log('[SWARM][state] energy=' + s.energy +
+              '  totalTouches=' + s.totalTouches +
+              '  status=' + s.status);
 });
 
 // ★ 观众每次触摸 → 糖信号 → flash 跳起来
 swarmSocket.on('triggerSugar', (d) => {
+  console.log('[SWARM][triggerSugar] 收到！', JSON.stringify(d));  // ★ 临时调试
   sugarFlashPulse = 1;
   if (window.SwarmSound) SwarmSound.playSugar(d.tier);
 });
 
 // ★ 刀信号：只进表演者耳机
 swarmSocket.on('triggerKnife', (d) => {
+  console.log('[SWARM][triggerKnife] 收到！', JSON.stringify(d));  // ★ 临时调试
   if (window.SwarmSound) SwarmSound.playKnife(d.tier);
 });
 
 // ★ 系统死机：energy 归零让你现有的状态机接管（captureFrozenFrame → FREEZING → OFFLINE）
 swarmSocket.on('systemOffline', () => {
+  console.log('[SWARM][systemOffline] 收到！');  // ★ 临时调试
   energy = 0;
 });
 
 // ★ 系统恢复：调你已有的函数
 swarmSocket.on('systemOnline', () => {
+  console.log('[SWARM][systemOnline] 收到！');  // ★ 临时调试
   setSystemOnline();
+});
+
+// ★ 临时调试：把所有收到的事件名都打出来，不管有没有专门监听
+// 如果触摸后这里完全没反应，说明服务器根本没有把事件发到这个页面
+swarmSocket.onAny((eventName, ...args) => {
+  console.log('[SWARM][any event]', eventName, args);
 });
 
 // ═══════════════════════════════════════════════════════════════
