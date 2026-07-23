@@ -38,6 +38,8 @@
   </filter>
 </svg>
 
+<!-- ★ SWARM 接线：socket.io 库，必须在其他脚本前面 -->
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/addons/p5.dom.min.js"></script>
 <script src="https://unpkg.com/ml5@1/dist/ml5.min.js"></script>
@@ -313,6 +315,50 @@ let faceMesh, video, faces = [], smooth = [];
 let laggedSmooth = [];   // 阶段2"坐标延迟和漂移"用的滞后跟随点（比smooth慢一拍）
 let modelReady = false;
 let autoZoom = 1.0;
+
+
+// ═══════════════════════════════════════════════════════════════
+// ★ SWARM 网络接线
+// 把这段粘在全局变量区，function preload() 上面就行
+// ═══════════════════════════════════════════════════════════════
+
+// 连接同源服务器（文件放在 public/ 里、通过 localhost:3000 打开时，io() 留空）
+const swarmSocket = io();
+let swarmConnected = false;
+
+// sugarFlashPulse：收到 triggerSugar 时设为1，draw() 里用它推 flashIntensity
+let sugarFlashPulse = 0;
+
+swarmSocket.on('connect',    () => { swarmConnected = true;  console.log('[SWARM] 已连接服务器'); });
+swarmSocket.on('disconnect', () => { swarmConnected = false; console.log('[SWARM] 与服务器断开'); });
+
+// ★ 服务器每秒约推10次 state，直接覆盖本地 energy 变量
+swarmSocket.on('state', (s) => {
+  energy = s.energy;
+});
+
+// ★ 观众每次触摸 → 糖信号 → flash 跳起来
+swarmSocket.on('triggerSugar', (d) => {
+  sugarFlashPulse = 1;
+  if (window.SwarmSound) SwarmSound.playSugar(d.tier);
+});
+
+// ★ 刀信号：只进表演者耳机
+swarmSocket.on('triggerKnife', (d) => {
+  if (window.SwarmSound) SwarmSound.playKnife(d.tier);
+});
+
+// ★ 系统死机：energy 归零让你现有的状态机接管（captureFrozenFrame → FREEZING → OFFLINE）
+swarmSocket.on('systemOffline', () => {
+  energy = 0;
+});
+
+// ★ 系统恢复：调你已有的函数
+swarmSocket.on('systemOnline', () => {
+  setSystemOnline();
+});
+
+// ═══════════════════════════════════════════════════════════════
 
 
 function preload(){
@@ -749,6 +795,9 @@ function draw(){
   // stage.chaos      : 0-1，阶段2的"衰竭强度"，驱动线漂移/网格断连/flash频闪
 
   // Flash 衰减：每帧执行
+  // ★ SWARM 接线：收到糖信号时把 flash 顶上去
+  flashIntensity = max(flashIntensity, sugarFlashPulse);
+  sugarFlashPulse *= 0.92;  // 脉冲同步衰减
   flashIntensity *= 0.92;
   if(flashIntensity < 0.001) flashIntensity = 0;
 
