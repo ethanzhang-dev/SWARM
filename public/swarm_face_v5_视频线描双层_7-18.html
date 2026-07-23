@@ -83,6 +83,12 @@ const LOCKED_MESH_ALPHA    = 30;    // 网格待机alpha（原子测试锁定，
 const LOCKED_VIDEO_ALPHA_S1 = 80;   // 阶段1（完美取悦）视频透明度
 const LOCKED_VIDEO_ALPHA_S2_FLOOR = 20; // 阶段2（机能衰竭）视频透明度下限
 
+// ★ 冻结画面专用透明度——之前直接借用了上面的20（8%不透明度），
+// 在正常光线的房间里几乎看不见，这是"不确定有没有冻结画面"的真正原因。
+// 冻结画面是一次性的关键叙事时刻（"疲惫的脸"），必须让人确实看清楚，
+// 所以单独给它一个高得多的值。这个数字没有被原子测试锁定过，可以随便调。
+const FREEZE_FRAME_ALPHA = 130;
+
 // ── 可调参数（这些还没锁定，仍可调）──────────────────────────────
 let CONTRACT  = 0.06;  // 向鼻子收缩的比例。你旧版是0.22 → 收缩越多越不像你
 let WOBBLE    = 1.4;   // 笔触抖动
@@ -355,11 +361,25 @@ swarmSocket.on('state', (s) => {
   }
   prevTotalTouches = s.totalTouches;
 
-  // ★★★ 用 status 字段的变化侦测 OFFLINE / ONLINE，代替等不到的专门事件
+  // ★★★ 用 status 字段的变化侦测 OFFLINE / ONLINE
+  //
+  // 修复：之前的写法是 energy = 0，寄望于draw()里的updateEnergySystem()
+  // 下一帧会读到这个0然后触发FREEZING。但服务器每100ms广播一次state，
+  // 如果OFFLINE是"过度触摸"路径触发的（server.js里cycleTouches到阈值），
+  // 服务器根本没把energy归零——下一条state消息一来，energy=s.energy
+  // 会把我们刚设的0覆盖掉，draw()很可能没来得及在这一帧里看到0，
+  // 触发窗口就关掉了。这就是"看不到黑屏"的真正原因。
+  //
+  // 现在直接在这里切状态机，不绕这个弯：
   if (s.status === 'OFFLINE' && prevStatus !== 'OFFLINE') {
-    energy = 0;   // 交给你已有的状态机：captureFrozenFrame → FREEZING → OFFLINE
+    console.log('[SWARM] ★ 检测到 OFFLINE，直接触发冻结序列');
+    energy = 0;              // 仍然同步一下，HUD显示更准确
+    captureFrozenFrame();     // 立刻截图，不等draw()下一帧
+    systemState = 'FREEZING';
+    freezeStartTime = millis();
   }
   if (s.status === 'ONLINE' && prevStatus === 'OFFLINE') {
+    console.log('[SWARM] ★ 检测到 ONLINE 恢复');
     setSystemOnline();
   }
   prevStatus = s.status;
@@ -1004,9 +1024,10 @@ function updateEnergySystem(){
       if(energySlider) energySlider.value(floor(energy));
     }
 
-    // ★ OFFLINE 的唯一触发条件：energy归零。
-    // 不检测人脸消失，不检测其他任何东西——就是这一个数字判断。
+    // ★ 本地测试用（键盘T/R、拖energy滑块）：energy归零也会触发，
+    // 逻辑和上面socket handler里的一样，两条路都能进FREEZING
     if(energy <= 0){
+      console.log('[SWARM] ★ (本地) energy<=0，触发冻结序列');
       captureFrozenFrame();
       systemState = 'FREEZING';
       freezeStartTime = millis();
@@ -1014,6 +1035,7 @@ function updateEnergySystem(){
 
   }else if(systemState === 'FREEZING'){
     if(millis() - freezeStartTime > FREEZE_DURATION_MS){
+      console.log('[SWARM] ★ 冻结时间到，切换到 OFFLINE 黑屏');
       systemState = 'OFFLINE';
     }
   }
@@ -1039,18 +1061,20 @@ function drawFreezingScreen(){
   background(0);
   if(frozenFrame){
     push();
-    tint(255, LOCKED_VIDEO_ALPHA_S2_FLOOR);  // 用阶段2的下限透明度(20)，"疲惫的脸"的观感
+    tint(255, FREEZE_FRAME_ALPHA);   // 之前用20几乎看不见，现在用130，清楚可辨
     image(frozenFrame, 0, 0);
     noTint();
     pop();
   }
 
-  // 调试用：显示倒计时，方便你确认FREEZE_DURATION_MS的时长手感对不对
-  // （正式演出前可以删掉这几行，不影响功能）
+  // 调试用：放大字号 + 加背景框，确保这个阶段"正在发生"是显而易见的
+  // （正式演出前可以删掉这几行，不影响功能——冻结画面本身仍然会正常显示）
   push();
-  noStroke(); fill(80); textAlign(LEFT,TOP); textSize(11); textFont('monospace');
+  noStroke();
+  fill(0,0,0,180); rect(15, 15, 260, 30, 4);
+  fill(255,180,80); textAlign(LEFT,TOP); textSize(15); textFont('monospace');
   let remain = max(0, FREEZE_DURATION_MS - (millis()-freezeStartTime));
-  text("FREEZING... " + (remain/1000).toFixed(1) + "s", 15, 15);
+  text("● FREEZING... " + (remain/1000).toFixed(1) + "s", 24, 22);
   pop();
 }
 
@@ -1067,6 +1091,12 @@ function drawOfflineScreen(){
   textFont('monospace');
   textSize(min(width, height) * 0.032);  // 相对屏幕尺寸，不同投影分辨率都合适
   text("SYSTEM OFFLINE", width/2, height/2);
+  pop();
+
+  // 调试用：角落小标记，确认这个函数确实在被调用（正式演出前删掉这几行即可）
+  push();
+  noStroke(); fill(255,80,80); textAlign(LEFT,TOP); textSize(11); textFont('monospace');
+  text("● OFFLINE ACTIVE", 15, 15);
   pop();
 }
 
