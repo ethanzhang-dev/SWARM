@@ -1,0 +1,1555 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>SWARM · 屏幕脸 v4 · 一笔画</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#000;overflow:hidden}
+  canvas{display:block}
+</style>
+</head>
+<body>
+
+<!--
+  ════════════════════════════════════════════════════════════════════
+  这一轮新加：隐藏的 SVG 滤镜——真正的"局部对比度增强"(unsharp mask)
+
+  为什么不用 CSS contrast()：
+  contrast() 是整体线性拉伸黑白差距，皮肤上本来就平坦的区域还是平坦，
+  不会长出纹理。要让"暗部的暗、结构的边缘"变清楚，需要的是经典的
+  "反锐化蒙版"算法：结果 = 原图 + 强度×(原图-模糊版原图)。
+  这个算法能在真正没有细节的地方保持平坦，只放大原本存在的
+  边缘和纹理——这才是医学影像"每个像素都在承载数据"的来源。
+
+  用 SVG 滤镜实现（而不是手写像素循环）：
+  Canvas 2D 的 drawingContext.filter 可以直接引用 url(#滤镜id)，
+  GPU加速、零JS像素操作开销。feComposite 的 arithmetic 模式
+  可以做 k2×原图 + k3×模糊图 的线性组合，就是反锐化公式本身。
+
+  k2 / k3 的值由"细节强化"滑块实时改写（在 drawVideoLayer 里）。
+  ════════════════════════════════════════════════════════════════════
+-->
+<svg style="position:absolute;width:0;height:0" aria-hidden="true">
+  <filter id="unsharpMask" x="-20%" y="-20%" width="140%" height="140%">
+    <feGaussianBlur in="SourceGraphic" stdDeviation="4" result="blurred"/>
+    <feComposite id="unsharpComposite" in="SourceGraphic" in2="blurred"
+                 operator="arithmetic" k1="0" k2="1" k3="0" k4="0"/>
+  </filter>
+</svg>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/addons/p5.dom.min.js"></script>
+<script src="https://unpkg.com/ml5@1/dist/ml5.min.js"></script>
+<script>
+
+// ══════════════════════════════════════════════════════════════════════
+//  SWARM 屏幕脸 v6 —— 方向已定：A方向（越维持越抽干）
+//
+//  核心机制：一个 energy 值（0-100）驱动三阶段视觉衰竭。
+//  energy 最终由 server.js 通过 socket.io 传入；现在还没接 socket，
+//  所以本地模拟：按 T 键 = 模拟一次触摸（消耗能量+触发flash），
+//  不摸时能量自动缓慢回升。
+//
+//  三阶段：
+//   阶段1 energy 100→50   完美取悦：videoAlpha=80，网格安静，flash满强度
+//   阶段2 energy 50→10    机能衰竭：videoAlpha滑向20，主线坐标漂移，
+//                          网格抽搐断连，flash变成不稳定频闪
+//   阶段3 energy=0         被动死机：冻结画面(2.5秒)→纯黑→SYSTEM OFFLINE
+//
+//  已锁定的基础参数（原子测试定的，不是滑块，是写死的常量）：
+//   遮罩=跟随脸部轮廓  背景=纯黑  主线=冷白/纯白 线宽1.0 工业断裂虚线
+//   网格待机=线宽0.5、alpha 30  视频待机=videoAlpha 80
+//
+//  ═══ 键盘（开发测试用）═══
+//   T     模拟一次触摸（消耗能量 + flash）★ 测试用，正式版是socket事件
+//   R     模拟 systemOnline（重置 energy=100，从OFFLINE状态恢复）
+//   ← →   收缩量   ↑ ↓ 笔触抖动   D 细节层级
+//   H 头发  E 耳朵  G 辉光  M 遮罩模式（调试用，正式已锁定跟随轮廓）
+//   1/2/3 配色   S 存图
+// ══════════════════════════════════════════════════════════════════════
+
+
+// ══════════════════════════════════════════════════════════════════════
+//  已锁定的基础参数 —— 原子测试定的，写死成常量，不再是滑块
+// ══════════════════════════════════════════════════════════════════════
+
+const LOCKED_LINE_W        = 1.0;   // 主轮廓线线宽（原子测试锁定）
+const LOCKED_COMPLETENESS  = 0.55;  // 工业级断裂虚线——永远保持断裂，不会随任何东西变流畅
+const LOCKED_MESH_WIDTH    = 0.5;   // 网格待机线宽（原子测试锁定）
+const LOCKED_MESH_ALPHA    = 30;    // 网格待机alpha（原子测试锁定，0-255制，30≈12%不透明）
+const LOCKED_VIDEO_ALPHA_S1 = 80;   // 阶段1（完美取悦）视频透明度
+const LOCKED_VIDEO_ALPHA_S2_FLOOR = 20; // 阶段2（机能衰竭）视频透明度下限
+
+// ── 可调参数（这些还没锁定，仍可调）──────────────────────────────
+let CONTRACT  = 0.06;  // 向鼻子收缩的比例。你旧版是0.22 → 收缩越多越不像你
+let WOBBLE    = 1.4;   // 笔触抖动
+let LINE_W    = LOCKED_LINE_W;  // 从锁定常量初始化，不再由滑块/键盘[ ]随意改
+let DETAIL    = 1;     // 0=最简 1=+鼻翼眼褶 2=+法令纹人中
+let SHOW_HAIR = false; // 头发默认关（v3的头发是太阳图案，先关掉看脸本身）
+let SHOW_EARS = true;
+let SHOW_GLOW = true;  // 辉光总开关（键盘G切换）；辉光强度另外用滑块控制
+let SHOW_TRAVEL = true; // 过渡线（一笔画的灵魂，键盘Y切换对比，T键现在用于模拟触摸）
+let HAIR_LEN  = 90;
+let PALETTE   = 0;
+let TARGET_H  = 0.62;  // 脸高占屏幕高度的比例（自动放大的目标）
+
+// ── 自定义颜色：锁定为"冷白/纯白"二选一，默认冷白 ──
+// null = 用 PALETTES 渐变；非null = 纯色覆盖（现在只留冷白/纯白两个按钮）
+let customColor = hexToRgbArr_safe('#E8F4F8');  // 默认冷白（原子测试锁定的方向）
+
+function hexToRgbArr_safe(hex){
+  // 提前声明用的小工具：因为 customColor 在文件顶部就要初始化，
+  // 而 hexToRgbArr() 定义在文件更下面。JS的函数声明会整体提升(hoist)，
+  // 所以这里直接调用真正的 hexToRgbArr 也没问题，这个safe版本只是保险。
+  hex = hex.replace('#','');
+  return [parseInt(hex.substring(0,2),16), parseInt(hex.substring(2,4),16), parseInt(hex.substring(4,6),16)];
+}
+
+const PALETTES = [
+  { name:"AMBER / RED", stops:[[255,235,120],[255,140,30],[220,40,10]], glow:"rgba(255,80,10,0.75)" },
+  { name:"VIOLET/CYAN", stops:[[170,60,255],[60,220,255],[0,255,230]],  glow:"rgba(80,180,255,0.7)" },
+  { name:"WHITE",       stops:[[255,255,255],[235,235,240],[190,190,200]], glow:"rgba(255,255,255,0.45)" }
+];
+
+
+// ══════════════════════════════════════════════════════════════════════
+//  视频层相关变量
+// ══════════════════════════════════════════════════════════════════════
+
+let videoLayer;          // 离屏画布：专门用来放"降饱和后的摄像头画面"
+
+// videoAlphaSlider 已删除——videoAlpha 现在完全由 energy 状态机计算
+// （阶段1固定80，阶段2从80滑向20），不再是可以随便拖的滑块。
+// lineAlpha 也已删除——主线固定用 255（完全不透明），"变淡"不是这个方向的机制。
+let grainSlider;         // 噪点颗粒强度（0-50，默认10）——这个还没锁定，继续可调
+let brightSlider;        // 亮度（0-100 → map 到 0.0-1.0，默认78）
+let contrastSlider;      // 对比度（0-100 → map 到 0.2-1.2，默认55）
+
+// 噪点图：128×96 的小图，每帧随机填充后拉伸到屏幕大小。
+const GRAIN_W = 128, GRAIN_H = 96;
+let noiseImg;
+
+
+// ══════════════════════════════════════════════════════════════════════
+//  这一轮新加①：背景遮罩相关
+//
+//  思路：不用 FaceMesh 轮廓做精确遮罩（那需要把468点连成一个多边形再
+//  裁切，计算量大且边缘生硬）。改用一个以画布中心为圆心的椭圆渐变——
+//  因为 pt() 已经把鼻子锁定在画布中心、autoZoom 已经把脸稳定在同一个
+//  视觉大小，所以一个"固定在屏幕中央、大小跟着脸走"的椭圆渐变遮罩，
+//  效果和"精确抠脸"几乎一样，但便宜得多，边缘也天然柔和。
+// ══════════════════════════════════════════════════════════════════════
+
+let maskSlider;    // 遮罩范围大小（30-250，默认100=基准大小）——三种模式共用同一个滑块
+
+// ── 这一轮新加：遮罩模式切换（三种可对比）──
+// 0 = 柔边椭圆（旧版，读起来像鬼影，问题反馈①）
+// 1 = 跟随脸部轮廓（用FACE_OVAL landmark多边形，硬边/极窄羽化）
+// 2 = 矩形硬边画框（脸部包围盒，完全无羽化）
+let MASK_MODE = 1;   // 默认改成"跟随轮廓"，标本感更准确
+
+let maskBtns = [];    // 遮罩模式按钮的DOM引用（用来在按M键切换时同步高亮）
+function refreshMaskBtnStyles(){
+  for(let b of maskBtns){
+    styleColorButton(b.el, b.idx===MASK_MODE ? '#3a8' : '#222', b.idx===MASK_MODE ? '#fff' : '#999');
+  }
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+//  这一轮新加②：原始三角网格层（tessellation）
+//
+//  说明：MediaPipe 官方有一份固定的468点三角剖分表（约900个三角形，
+//  2000多个索引），但那份表太长，我没办法保证凭记忆完整准确地写出来
+//  ——错的三角形连接会比没有更糟。所以这里用一个我能验证正确性的
+//  替代方案：邻近点自动连线（距离小于阈值的两点连一条边）。
+//  视觉效果同样是"密集的三角网状结构"，而且我们在7/18版本的开发过程
+//  中已经实测过这个方法在14168条边时仍有61.7fps，性能有保证。
+//  如果你手上有官方三角剖分的索引数据，可以替换成那份，效果会更接近
+//  "真实tessellation"，结构不用改。
+// ══════════════════════════════════════════════════════════════════════
+
+let meshLayer;                  // 离屏画布：三角网格单独画在这里，再整体遮罩+叠加
+// meshSlider 和 meshLineWidthSlider 已删除——网格线宽/alpha 现在是锁定常量
+// （LOCKED_MESH_WIDTH=0.5, LOCKED_MESH_ALPHA=30），阶段2会在这个基础上叠加
+// "抽搐断连"效果（见 drawMeshLayer 里的 stage2Chaos 分支），但基础粗细/透明度不再可调。
+let meshDensitySelect;            // 网格密度下拉框：100%/50%/33%/20%，对应MESH_SKIP（性能阀门，继续保留）
+let meshEdges = null;             // 缓存的"哪两个点算相邻"（存索引对，不存坐标）
+let lastMeshCompute = -999999;    // 上次重新计算邻接关系的时间戳
+const MESH_DIST_PX = 30;          // 判定"相邻"的距离阈值（未缩放前的基准像素值）
+const MESH_RECOMPUTE_MS = 3000;   // 每3秒重新计算一次邻接关系
+let MESH_SKIP = 1;                // 性能阀门：1=画全部边，2=一半，3=三分之一，5=五分之一
+
+
+// ══════════════════════════════════════════════════════════════════════
+//  这一轮新加③：辉光强度 + 线条完整度
+// ══════════════════════════════════════════════════════════════════════
+
+let glowSlider;           // 辉光强度（0-100，默认25）——还没锁定，继续可调
+// completenessSlider 已删除——线条完整度现在是锁定常量 LOCKED_COMPLETENESS=0.55
+// lineWidthSlider / meshLineWidthSlider 已删除——都是锁定常量了
+// flashMaxSlider 已删除——阶段1的flash现在固定100%强度（"冷白过曝"），不再可调
+
+
+// ══════════════════════════════════════════════════════════════════════
+//  ★★★ 核心：energy 状态机 ★★★
+//
+//  energy: 0-100，最终由 server.js 算出、通过 socket.io 传进来。
+//  现在 socket 还没接，所以本地模拟：
+//    - 按 T 键 = 模拟一次触摸 → onTouch() → flash + 消耗能量
+//    - 不触摸一段时间后，能量自动缓慢回升（模拟"无人打扰、系统休息"）
+//
+//  三个阶段由 energy 数值本身决定，不需要额外的"状态"变量：
+//    energy ∈ [50,100] → 阶段1 完美取悦
+//    energy ∈ (0, 50)  → 阶段2 机能衰竭（越接近0越严重）
+//    energy <= 0        → 触发 OFFLINE 序列（一次性事件，见 systemState）
+// ══════════════════════════════════════════════════════════════════════
+
+let energy = 100;                  // 当前能量值，0-100
+let lastEnergyActionTime = 0;      // 上次"触摸"或手动设置能量的时间戳（用来判断"多久没摸了"）
+const ENERGY_REGEN_DELAY_MS = 600; // 停止触摸超过这么久，才开始被动回升
+const ENERGY_REGEN_PER_SEC  = 8;   // 回升速度：每秒回升多少点（本地模拟用，server接入后这个值可能被替代）
+const ENERGY_DRAIN_PER_TOUCH = 5;  // 模拟触摸时，一次消耗多少能量（同样是本地占位值）
+
+let energySlider;   // 面板上的能量滑块——可以直接拖到任意值，跳着测试某个阶段的效果
+
+// ── 系统状态：ONLINE 正常运行 / FREEZING 冻结画面倒数 / OFFLINE 黑屏死机 ──
+let systemState = 'ONLINE';
+let freezeStartTime = 0;
+const FREEZE_DURATION_MS = 2500;   // 冻结画面停留多久（2-3秒区间，取2.5秒）
+let frozenFrame = null;            // 离屏画布：能量归零那一刻的视频画面快照
+
+// ── Flash 状态（阶段1：单次触摸的短暂过曝；阶段2：变成不稳定频闪）──
+// flashIntensity: 0-1，每帧自动衰减(×0.92)。触摸时跳回1.0。
+let flashIntensity = 0;
+
+
+// ══════════════════════════════════════════════════════════════════════
+//  这一轮新加④：局部对比度增强（"细节强化"）
+//
+//  和普通 contrast() 的区别：contrast()是整体线性拉伸，平坦的皮肤区域
+//  拉伸完还是平坦。这里用的是反锐化蒙版(unsharp mask)算法——
+//  结果 = 原图 + 强度×(原图-模糊版原图)，只放大"本来就存在的边缘和纹理"，
+//  真正没有细节的地方不会凭空长出假纹理。
+//  具体实现在页面顶部的隐藏SVG滤镜里（<filter id="unsharpMask">），
+//  detailSlider 的值会实时改写该滤镜的 feComposite 参数。
+// ══════════════════════════════════════════════════════════════════════
+
+let detailSlider;         // 细节强化（0-100，默认35）
+let unsharpKNode = null;  // 指向SVG滤镜里 <feComposite id="unsharpComposite"> 的DOM引用
+
+
+// ══════════════════════════════════════════════════════════════════════
+//  FACE_OVAL_IDX —— 脸部轮廓的468点索引（单独抽出来，两处要用）
+//
+//  这一轮之前，这串数字是直接写死在 PATH_BASE 数组开头的。
+//  现在遮罩的"跟随脸部轮廓"模式也需要同一串轮廓点，抽成独立常量，
+//  两处都从这里取，不用把同一串36个数字抄两遍（抄两遍容易抄错，
+//  而且以后要改轮廓形状只需要改一个地方）。
+// ══════════════════════════════════════════════════════════════════════
+
+const FACE_OVAL_IDX = [
+  10,338,297,332,284,251,389,356,454,323,361,288,397,365,379,378,400,377,
+  152,148,176,149,150,136,172,58,132,93,234,127,162,21,54,103,67,109,10
+];
+
+
+// ══════════════════════════════════════════════════════════════════════
+//  一笔画路径
+//
+//  这是整个视觉的核心。一个连续的索引序列，笔从头走到尾不抬起。
+//  部件与部件之间的「跳跃」会画出一条过渡线——那正是一笔画的标志。
+//  （直接沿用并扩展你旧版的 ONE_LINE_PATH）
+// ══════════════════════════════════════════════════════════════════════
+
+const PATH_BASE = [
+  // ① 脸型：绕一整圈回到起点 10（现在从 FACE_OVAL_IDX 取，不再重复写）
+  ...FACE_OVAL_IDX,
+
+  // ② 跳到右眉 →  沿眉毛走
+  70,63,105,66,107,
+
+  // ③ 跳到右眼 → 绕一圈回到起点
+  33,160,158,133,153,144,33,
+
+  // ④ 跳到左眉
+  285,295,282,283,276,
+
+  // ⑤ 左眼
+  263,387,385,373,380,263,
+
+  // ⑥ 从眉心下来：鼻梁
+  168,6,197,195,5,4,
+
+  // ⑦ 鼻底 + 两侧鼻翼（v3缺这段，是"不像脸"的主因之一）
+  129,98,97,2,326,327,358,
+
+  // ⑧ 跳到嘴：外唇一圈
+  0,267,269,270,409,291,375,321,405,314,17,84,181,91,146,61,185,40,39,37,0,
+
+  // ⑨ 内唇线（上下唇接缝）
+  78,81,13,311,308,402,14,178,78
+];
+
+// 细节层 1：眼褶（双眼皮）+ 鼻孔勾
+const PATH_D1 = [
+  [130,247,30,29,27,28,56,190],        // 右眼上褶
+  [359,467,260,259,257,258,286,414],   // 左眼上褶
+  [129,98],                            // 右鼻孔勾
+  [358,327]                            // 左鼻孔勾
+];
+
+// 细节层 2：法令纹 + 人中（这两条极大影响年龄感和辨识度）
+const PATH_D2 = [
+  [129,203,206,216,212],   // 右法令纹
+  [358,423,426,436,432],   // 左法令纹
+  [2,164,0]                // 人中
+];
+
+
+// ── 全局变量 ──────────────────────────────────────────────────────
+let faceMesh, video, faces = [], smooth = [];
+let laggedSmooth = [];   // 阶段2"坐标延迟和漂移"用的滞后跟随点（比smooth慢一拍）
+let modelReady = false;
+let autoZoom = 1.0;
+
+
+function preload(){
+  faceMesh = ml5.faceMesh({ maxFaces:1, refineLandmarks:false, flipHorizontal:true });
+}
+
+function setup(){
+  createCanvas(windowWidth, windowHeight);
+  pixelDensity(1);            // 投影/电视不需要视网膜渲染，这是最大的性能优化
+  video = createCapture(VIDEO);
+  video.size(640,480);
+  video.hide();
+  video.elt.onloadedmetadata = () => {
+    faceMesh.detectStart(video, r => { modelReady = true; faces = r; });
+  };
+  strokeCap(ROUND);           // 圆头笔触，逐段画线时接缝不会露出来
+  textFont('monospace');
+  noFill();
+
+  // ── 今天新加②：创建视频层的离屏画布 ──
+  videoLayer = createGraphics(windowWidth, windowHeight);
+  videoLayer.pixelDensity(1);
+
+  // ── 这一轮新加：三角网格层的离屏画布 ──
+  meshLayer = createGraphics(windowWidth, windowHeight);
+  meshLayer.pixelDensity(1);
+
+  // ── 今天新加②b：噪点图 ──
+  // createImage 比 createGraphics 轻量，只存像素数据，没有绘图上下文开销
+  noiseImg = createImage(GRAIN_W, GRAIN_H);
+
+  // ── 这一轮新加：拿到页面顶部隐藏SVG滤镜里的feComposite节点 ──
+  // 之后每帧根据 detailSlider 的值改写它的 k2/k3 属性，实时调节"细节强化"强度
+  unsharpKNode = document.getElementById('unsharpComposite');
+
+  // ── 这一轮新加：冻结帧缓冲区（OFFLINE序列用）──
+  // energy归零那一刻，把videoLayer当时的画面复制进这里，
+  // 之后2.5秒的"冻结画面"阶段就一直显示这张静态快照
+  frozenFrame = createGraphics(windowWidth, windowHeight);
+  frozenFrame.pixelDensity(1);
+
+  // ── 今天新加③：调试滑块面板 ──
+  // 用 p5.dom 的 createSlider，是网页原生的拖动条，不是画在canvas里的。
+  // 这是开发调试工具，摆在屏幕顶部，演出前会整个删掉。
+  createSliderPanel();
+}
+
+function windowResized(){
+  resizeCanvas(windowWidth, windowHeight);
+  // 三个离屏画布都要跟着窗口尺寸重建，不然画面会错位或拉伸
+  videoLayer = createGraphics(windowWidth, windowHeight);
+  videoLayer.pixelDensity(1);
+  meshLayer = createGraphics(windowWidth, windowHeight);
+  meshLayer.pixelDensity(1);
+  frozenFrame = createGraphics(windowWidth, windowHeight);
+  frozenFrame.pixelDensity(1);
+  meshEdges = null;   // 尺寸变了，邻接关系的距离阈值也变了，强制下一帧重新计算
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+//  createSliderPanel() —— 调试用的两个滑块
+//
+//  这一整块只是「开发工具」，不是作品的一部分。
+//  用普通网页控件（HTML input range），不占用 canvas 绘制性能，
+//  也不会和临床风格的画面混在一起——它浮在画面最上层的半透明条里。
+// ══════════════════════════════════════════════════════════════════════
+
+function createSliderPanel(){
+  let panel = createDiv('');
+  panel.style('position','fixed');
+  panel.style('top','0');
+  panel.style('left','0');
+  panel.style('width','100%');
+  panel.style('background','rgba(0,0,0,0.82)');
+  panel.style('padding','8px 16px');
+  panel.style('font-family','monospace');
+  panel.style('color','#ccc');
+  panel.style('font-size','12px');
+  panel.style('z-index','999');
+  panel.style('display','flex');
+  panel.style('flex-direction','column');
+  panel.style('gap','8px');
+
+  // ── 第一行：所有数值型滑块 ──
+  let row1 = createDiv('');
+  row1.parent(panel);
+  row1.style('display','flex');
+  row1.style('gap','20px');
+  row1.style('flex-wrap','wrap');
+  row1.style('align-items','flex-end');
+
+  // ── 全局：存每个滑块对应的"实时数值span"引用，draw()里每帧更新 ──
+  // 用普通JS对象存，不依赖p5的变量系统
+  window._sliderRefs = {};
+
+  // 通用：创建"标签 + 数值 + 滑块"组合
+  // key 参数供 draw() 里的 updateSliderValues() 用来识别是哪个滑块
+  function makeSlider(label, min, max, defaultVal, step, key){
+    let g = createDiv('');
+    g.parent(row1);
+    g.style('display','flex');
+    g.style('flex-direction','column');
+    g.style('gap','1px');
+
+    // 上行：标签（左）+ 当前数值（右）
+    let topRow = createDiv('');
+    topRow.parent(g);
+    topRow.style('display','flex');
+    topRow.style('justify-content','space-between');
+    topRow.style('align-items','baseline');
+
+    let sp = createSpan(label);
+    sp.parent(topRow);
+    sp.style('color','#888');
+    sp.style('font-size','9px');
+
+    // 数值显示：蓝色高亮，bold，让它一眼可读
+    let valSp = createSpan(String(defaultVal));
+    valSp.parent(topRow);
+    valSp.style('color','#7be');
+    valSp.style('font-size','10px');
+    valSp.style('font-weight','bold');
+    valSp.style('margin-left','4px');
+
+    let sl = createSlider(min, max, defaultVal, step);
+    sl.parent(g);
+    sl.style('width','115px');
+
+    if(key) window._sliderRefs[key] = { sl: sl, sp: valSp };
+    return sl;
+  }
+
+  // ── 默认值说明：以下都是"还没锁定、继续可调"的参数 ──
+  grainSlider        = makeSlider('噪点 grain',          0,   50,  0,   1, 'grain');
+  brightSlider       = makeSlider('亮度 brightness',     0,   100, 78,  1, 'bright');
+  contrastSlider     = makeSlider('对比度 contrast',     0,   100, 55,  1, 'contrast');
+  detailSlider       = makeSlider('细节强化 detail',     0,   100, 35,  1, 'detail');
+  maskSlider         = makeSlider('遮罩范围 maskSize',   30,  250, 110, 1, 'mask');
+  glowSlider         = makeSlider('辉光 glow',           0,   100, 25,  1, 'glow');
+
+  // ══ Energy 测试面板 ══ ——这是这一轮新加的核心测试工具
+  let energyGroup = createDiv('');
+  energyGroup.parent(row1);
+  energyGroup.style('display','flex');
+  energyGroup.style('flex-direction','column');
+  energyGroup.style('gap','1px');
+  let energyTop = createDiv('');
+  energyTop.parent(energyGroup);
+  energyTop.style('display','flex');
+  energyTop.style('justify-content','space-between');
+  let energyLabel = createSpan('★ENERGY（可直接拖跳阶段）');
+  energyLabel.parent(energyTop);
+  energyLabel.style('color','#fb5');
+  energyLabel.style('font-size','9px');
+  energyLabel.style('font-weight','bold');
+  let energyVal = createSpan('100');
+  energyVal.parent(energyTop);
+  energyVal.style('color','#fb5');
+  energyVal.style('font-size','10px');
+  energyVal.style('font-weight','bold');
+  energySlider = createSlider(0, 100, 100, 1);
+  energySlider.parent(energyGroup);
+  energySlider.style('width','160px');
+  // 拖动滑块 = 直接把 energy 设成这个值，同时重置"最近有动作"的计时器，
+  // 避免被动回升逻辑立刻把你刚设的值又拉回去
+  energySlider.input(() => {
+    energy = energySlider.value();
+    lastEnergyActionTime = millis();
+  });
+  window._sliderRefs['energy'] = { sl: energySlider, sp: energyVal };
+
+  // ── 第二行：颜色预设按钮（已锁定为"冷白/纯白"二选一）──
+  let row2 = createDiv('');
+  row2.parent(panel);
+  row2.style('display','flex');
+  row2.style('gap','10px');
+  row2.style('align-items','center');
+
+  let lbl = createSpan('主线颜色（已锁定方向，冷白/纯白二选一）：');
+  lbl.parent(row2);
+  lbl.style('color','#888');
+  lbl.style('font-size','11px');
+
+  const PRESETS = [
+    { hex:'#E8F4F8', name:'冷白（默认）' },
+    { hex:'#FFFFFF', name:'纯白' }
+  ];
+
+  for(let p of PRESETS){
+    let btn = createButton(p.name + ' ' + p.hex);
+    btn.parent(row2);
+    styleColorButton(btn, p.hex);
+    btn.mousePressed(() => { customColor = hexToRgbArr(p.hex); });
+  }
+
+  // ── 第三行：系统状态测试 + 网格密度 ──
+  let row3 = createDiv('');
+  row3.parent(panel);
+  row3.style('display','flex');
+  row3.style('gap','14px');
+  row3.style('align-items','center');
+
+  let lbl3 = createSpan('系统测试：[T]模拟触摸  [R]模拟systemOnline恢复　　网格密度（性能阀门）：');
+  lbl3.parent(row3);
+  lbl3.style('color','#888');
+  lbl3.style('font-size','11px');
+
+  meshDensitySelect = createSelect();
+  meshDensitySelect.parent(row3);
+  meshDensitySelect.option('100%（全部边）', 1);
+  meshDensitySelect.option('50%',            2);
+  meshDensitySelect.option('33%',            3);
+  meshDensitySelect.option('20%（最快）',     5);
+  meshDensitySelect.selected(1);
+  meshDensitySelect.changed(() => {
+    MESH_SKIP = int(meshDensitySelect.value());
+  });
+  meshDensitySelect.style('font-family','monospace');
+  meshDensitySelect.style('font-size','11px');
+}
+
+// 按钮的通用样式（背景色=预览色，文字色自动选黑/白保证可读）
+function styleColorButton(btn, bgHex, textColor){
+  btn.style('background', bgHex);
+  btn.style('color', textColor || pickReadableTextColor(bgHex));
+  btn.style('border','1px solid #555');
+  btn.style('border-radius','3px');
+  btn.style('padding','3px 9px');
+  btn.style('font-family','monospace');
+  btn.style('font-size','11px');
+  btn.style('cursor','pointer');
+}
+
+// 简单亮度判断：背景色浅就用黑字，背景色深就用白字
+function pickReadableTextColor(hex){
+  let rgb = hexToRgbArr(hex);
+  let lum = 0.299*rgb[0] + 0.587*rgb[1] + 0.114*rgb[2];
+  return lum > 150 ? '#111' : '#eee';
+}
+
+// #RRGGBB → [R,G,B]
+function hexToRgbArr(hex){
+  hex = hex.replace('#','');
+  return [
+    parseInt(hex.substring(0,2), 16),
+    parseInt(hex.substring(2,4), 16),
+    parseInt(hex.substring(4,6), 16)
+  ];
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+//  pt() / ptFrom() / ptDrift() —— landmark索引 → 屏幕坐标
+//
+//  ptFrom(srcArr, i)：核心变换（收缩→居中→缩放），可以指定"从哪个数组
+//  取原始坐标"——这是支持"漂移"效果的关键：漂移不是另一套变换逻辑，
+//  只是把同一套变换应用在两个不同的原始坐标源上（实时 vs 滞后），
+//  然后混合两者的结果。
+//
+//  pt(i)：正常情况下用，从实时的 smooth[] 取值（阶段1、和其他所有
+//         非主线元素——视频/网格/遮罩/耳朵/头发都用这个，永远精准）
+//
+//  ptDrift(i, chaos)：阶段2专用，只在drawFace()构建主线路径时调用。
+//         chaos=0时和pt(i)完全一样；chaos越大，越多混入"滞后位置"
+//         + 越大的随机抖动——这就是"坐标延迟和漂移，像机器视觉抓瞎"。
+// ══════════════════════════════════════════════════════════════════════
+
+function ptFrom(srcArr, i){
+  if(!srcArr[i]) return {x:width/2, y:height/2};
+  let nose = smooth[1];   // 鼻子锚点永远用实时位置——否则漂移会让整张脸一起
+                          // 移出画面，而不是"五官内部错位"，那是两种不同的效果
+
+  let bx = lerp(srcArr[i].x, nose.x, CONTRACT);
+  let by = lerp(srcArr[i].y, nose.y, CONTRACT);
+  bx = bx - nose.x;
+  by = by - nose.y;
+  bx *= autoZoom;
+  by *= autoZoom;
+  return { x: bx + width/2, y: by + height/2 };
+}
+
+function pt(i){
+  return ptFrom(smooth, i);
+}
+
+function ptDrift(i, chaos){
+  let real = ptFrom(smooth, i);
+  if(chaos <= 0 || laggedSmooth.length <= i) return real;
+
+  let lag = ptFrom(laggedSmooth, i);
+  let bx = lerp(real.x, lag.x, chaos);
+  let by = lerp(real.y, lag.y, chaos);
+
+  // 额外随机漂移：chaos越大抖动越明显（"机器视觉抓瞎"的坐标跳动感）
+  // 最大约±6px（chaos=1时），用noise而不是random，让抖动连续不闪烁
+  let driftAmt = chaos * 6;
+  bx += (noise(i*0.37, frameCount*0.05) - 0.5) * driftAmt * 2;
+  by += (noise(i*0.37+500, frameCount*0.05) - 0.5) * driftAmt * 2;
+
+  return { x: bx, y: by };
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+//  toSmoothPoly() —— 把索引列表变成密集的平滑折线
+//
+//  为什么不能直接用 beginShape + curveVertex？
+//  因为 p5 的一个 shape 里 strokeWeight 不能中途改变。
+//  而「手绘感」的核心恰恰是线宽在变（笔压）。
+//
+//  所以：先用 curvePoint() 自己把曲线算成密集点列，
+//  再一段一段用 line() 画，每段单独设线宽。
+//  → 既有曲线的顺滑，又有笔压的变化。
+//
+//  chaos 参数（默认0）：>0时用 ptDrift() 代替 pt()，让阶段2的主线
+//  产生"坐标延迟和漂移"。耳朵/头发不会调用带chaos的版本，始终精准。
+// ══════════════════════════════════════════════════════════════════════
+
+function toSmoothPoly(indices, res, chaos=0){
+  // 先取出实际坐标 + 加抖动
+  let raw = [];
+  for(let n=0; n<indices.length; n++){
+    let p = chaos > 0 ? ptDrift(indices[n], chaos) : pt(indices[n]);
+    if(WOBBLE > 0){
+      let s = indices[n] * 0.31;
+      p.x += (noise(s, frameCount*0.006) - 0.5) * WOBBLE * 2;
+      p.y += (noise(s+77, frameCount*0.006) - 0.5) * WOBBLE * 2;
+    }
+    raw.push(p);
+  }
+  if(raw.length < 2) return [];
+
+  // Catmull-Rom 插值（p5 的 curvePoint 就是这个）
+  let out = [];
+  for(let i=0; i<raw.length-1; i++){
+    let p0 = raw[max(0,i-1)];
+    let p1 = raw[i];
+    let p2 = raw[i+1];
+    let p3 = raw[min(raw.length-1,i+2)];
+    for(let s=0; s<res; s++){
+      let t = s/res;
+      out.push({
+        x: curvePoint(p0.x,p1.x,p2.x,p3.x,t),
+        y: curvePoint(p0.y,p1.y,p2.y,p3.y,t)
+      });
+    }
+  }
+  out.push(raw[raw.length-1]);
+  return out;
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+//  drawPressureLine() —— 用变化的线宽画一条折线
+//
+//  这是「手绘感」的真正来源。
+//  真人画线时手的压力在变：起笔轻、中段重、收笔轻，还有随机的抖。
+//  用 noise 沿着线的长度调制线宽，就能模拟这个。
+// ══════════════════════════════════════════════════════════════════════
+
+function drawPressureLine(poly, baseW, seed, completeness){
+  if(poly.length < 2) return;
+  for(let i=0; i<poly.length-1; i++){
+
+    // ── 这一轮新加：线条完整度（断续效果）──
+    // completeness=1 时永远不跳过（完整连续）。
+    // completeness降低时，沿线用固定噪声（不随时间变化，避免"故障风"闪烁）
+    // 决定哪些小段被跳过，制造断续、有缺口的效果。
+    // 之后会用触摸次数驱动 completeness：摸得越多线越完整，
+    // 呼应"维持"的机制——但今天先接好参数，不接触摸事件。
+    if(completeness < 1){
+      let gapNoise = noise(seed*3.7 + i*0.17);
+      if(gapNoise > completeness) continue;
+    }
+
+    let t = i / (poly.length-1);
+
+    // 笔压曲线：起笔和收笔细，中段粗
+    let taper = sin(t * PI) * 0.4 + 0.6;   // 0.6 → 1.0 → 0.6
+
+    // 随机压力波动（沿线变化，不随时间变，所以线条稳定不闪）
+    let jitter = noise(seed + i*0.06) * 0.85 + 0.45;
+
+    strokeWeight(baseW * taper * jitter);
+    line(poly[i].x, poly[i].y, poly[i+1].x, poly[i+1].y);
+  }
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+//  draw()
+// ══════════════════════════════════════════════════════════════════════
+
+function draw(){
+  background(0);
+
+  // ── 每帧更新所有滑块的数值显示（包括energy滑块）──
+  if(window._sliderRefs){
+    for(let k in window._sliderRefs){
+      let ref = window._sliderRefs[k];
+      // energy滑块比较特殊：它的数值由energy变量反向驱动（回升时滑块要跟着走），
+      // 其他滑块正常情况是"滑块驱动数值"，这里统一用sl.value()显示已经足够，
+      // 因为energySlider.value(...)在updateEnergySystem()里已经被同步过了
+      ref.sp.html(ref.sl.value());
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  //  能量系统 + 状态机：整个视觉的总开关
+  //  这个函数会更新 energy、判断要不要触发OFFLINE、推进冻结倒计时
+  // ══════════════════════════════════════════════════════════════════
+  updateEnergySystem();
+
+  // ── OFFLINE：黑屏 + 文字，跳过所有正常绘制 ──
+  if(systemState === 'OFFLINE'){
+    drawOfflineScreen();
+    return;
+  }
+
+  // ── FREEZING：冻结画面倒计时，跳过所有正常绘制 ──
+  if(systemState === 'FREEZING'){
+    drawFreezingScreen();
+    return;
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  //  以下是 systemState === 'ONLINE' 的正常绘制流程
+  // ══════════════════════════════════════════════════════════════════
+
+  // 根据当前energy值，算出这一帧三层视觉该用的参数
+  let stage = getStageParams(energy);
+  // stage.videoAlpha : 视频层透明度（阶段1恒定80，阶段2滑向20）
+  // stage.chaos      : 0-1，阶段2的"衰竭强度"，驱动线漂移/网格断连/flash频闪
+
+  // Flash 衰减：每帧执行
+  flashIntensity *= 0.92;
+  if(flashIntensity < 0.001) flashIntensity = 0;
+
+  // 视频层不依赖 FaceMesh 是否检测到脸——只要摄像头开着就能画。
+  drawVideoLayer(stage.videoAlpha);
+
+  if(!modelReady){
+    fill(70); noStroke(); textAlign(CENTER,CENTER); textSize(15);
+    text("FaceMesh 加载中……", width/2, height/2);
+    noFill(); drawHUD(stage); return;
+  }
+
+  if(faces.length === 0){
+    fill(45); noStroke(); textAlign(CENTER,CENTER); textSize(14);
+    text("请把脸移入画面", width/2, height/2);
+    noFill(); drawHUD(stage); return;
+  }
+
+  // ── 关键点平滑（低通滤波，消除 FaceMesh 的逐帧抖动）──
+  let kp = faces[0].keypoints;
+  if(smooth.length !== kp.length){
+    smooth = kp.map(p=>({x:p.x, y:p.y}));
+  }else{
+    for(let i=0;i<kp.length;i++){
+      smooth[i].x = lerp(smooth[i].x, kp[i].x, 0.35);
+      smooth[i].y = lerp(smooth[i].y, kp[i].y, 0.35);
+    }
+  }
+
+  // ── 阶段2专用：滞后跟随点（"坐标延迟和漂移"的来源）──
+  // laggedSmooth 用比 smooth 更慢的速率追赶真实位置。
+  // chaos=0时几乎瞬间追上（阶段1精准咬合）；chaos越大追得越慢（阶段2抓瞎）。
+  if(laggedSmooth.length !== smooth.length){
+    laggedSmooth = smooth.map(p=>({x:p.x, y:p.y}));
+  }else{
+    let lagLerp = map(stage.chaos, 0, 1, 0.35, 0.035);
+    for(let i=0;i<smooth.length;i++){
+      laggedSmooth[i].x = lerp(laggedSmooth[i].x, smooth[i].x, lagLerp);
+      laggedSmooth[i].y = lerp(laggedSmooth[i].y, smooth[i].y, lagLerp);
+    }
+  }
+
+  // ── 自动放大：让脸高稳定占屏幕的 TARGET_H ──
+  let faceH = dist(smooth[10].x,smooth[10].y, smooth[152].x,smooth[152].y);
+  let want = constrain((height*TARGET_H)/max(faceH,1), 0.5, 6.0);
+  autoZoom = lerp(autoZoom, want, 0.06);
+
+  // 三层顺序：视频（真实身体）→ 三角网格（系统原始数据）→ 优雅单线（美化输出）
+  drawMeshLayer(stage.chaos);
+  drawFace(stage.chaos);
+  drawHUD(stage);
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+//  今天新加⑤：drawVideoLayer() —— 画降饱和、可调透明度的摄像头画面
+//
+//  ★ 对齐的关键理解 ★
+//  pt() 做了三步变换，视频必须做完全相同的三步，才能和线描对齐：
+//    ① 以鼻子坐标为原点（translate -nose）
+//    ② 按 autoZoom 放大（scale autoZoom）
+//    ③ 平移到画布中心（translate width/2, height/2）
+//
+//  而且还要做 ④ 正确的镜像。
+//
+//  旧版的错误：
+//    image(video, 0,0, width,height) —— 把640×480拉伸到整个画布，
+//    这和 pt() 的放大方式完全不同，所以怎么调都对不上。
+//
+//  新版的做法：
+//    和 pt() 做同样的变换，视频在 640×480 原始分辨率下绘制（不拉伸），
+//    由 autoZoom 决定在屏幕上占多大，由 nose 决定在哪里——和线描完全一致。
+//
+//  镜像的数学：
+//    FaceMesh flipHorizontal:true 让坐标满足 x_mesh = 640 - x_raw。
+//    要让视频像素 x_raw 出现在线描坐标 x_mesh 的位置，等价于：
+//      x_out = -x_in + 640
+//    用 canvas 变换实现：先 translate(640, 0)，再 scale(-1, 1)。
+//    顺序重要！canvas 变换是后调用的先作用于点。
+//    → scale 先作用：x → -x
+//    → translate 后作用：-x → -x + 640  ✓
+// ══════════════════════════════════════════════════════════════════════
+
+// ══════════════════════════════════════════════════════════════════════
+//  ★★★ Energy 状态机核心函数 ★★★
+// ══════════════════════════════════════════════════════════════════════
+
+
+// ── getStageParams() ──────────────────────────────────────────────────
+// 输入当前energy，返回这一帧三层视觉该用的参数。
+// 这是整个三阶段机制的"翻译表"——energy这一个数字，翻译成好几个
+// 具体的视觉参数（视频透明度、混乱强度）。
+//
+//   energy ∈ [50,100] → 阶段1：videoAlpha恒定80，chaos=0（完全精准）
+//   energy ∈ [10,50)  → 阶段2：videoAlpha从80线性滑向20，chaos从0升到1
+//   energy ∈ [0,10)   → 阶段2末尾的最大衰竭状态，维持到energy=0触发OFFLINE
+function getStageParams(e){
+  let videoAlpha, chaos;
+  if(e >= 50){
+    videoAlpha = LOCKED_VIDEO_ALPHA_S1;      // 80，恒定
+    chaos = 0;
+  }else if(e >= 10){
+    videoAlpha = map(e, 50, 10, LOCKED_VIDEO_ALPHA_S1, LOCKED_VIDEO_ALPHA_S2_FLOOR);
+    chaos = map(e, 50, 10, 0, 1);
+  }else{
+    // energy 10以下：保持阶段2末尾的最大衰竭状态，直到0触发OFFLINE
+    videoAlpha = LOCKED_VIDEO_ALPHA_S2_FLOOR; // 20
+    chaos = 1;
+  }
+  return { videoAlpha, chaos };
+}
+
+
+// ── onTouch() ────────────────────────────────────────────────────────
+// 这是"一次触摸"的完整效果：flash + 消耗能量。
+// 现在：键盘 T 键手动调用，模拟一次观众触摸
+// 之后：socket.io 的 'triggerSugar'（或server发来的touch事件）会调用这个函数，
+//       到时候 ENERGY_DRAIN_PER_TOUCH 这个本地占位值会被server算出的真实值取代
+//       ——但函数签名和调用方式不用变，接socket时只要在事件回调里调 onTouch() 就行。
+function onTouch(){
+  triggerFlash();
+  energy = constrain(energy - ENERGY_DRAIN_PER_TOUCH, 0, 100);
+  lastEnergyActionTime = millis();
+  if(energySlider) energySlider.value(floor(energy));
+}
+
+
+// ── updateEnergySystem() ─────────────────────────────────────────────
+// 每帧调用。管理energy的被动回升，以及ONLINE→FREEZING→OFFLINE的状态转换。
+function updateEnergySystem(){
+  if(systemState === 'ONLINE'){
+
+    // 被动回升：距离上次触摸/手动设置超过 ENERGY_REGEN_DELAY_MS，才开始回升
+    // （一直被摸的时候不回升——只有"停下来"才会恢复，这是"无触摸时缓慢回升"的实现）
+    if(millis() - lastEnergyActionTime > ENERGY_REGEN_DELAY_MS){
+      energy = min(100, energy + ENERGY_REGEN_PER_SEC / 60);  // 假设约60fps，每帧回升一点点
+      if(energySlider) energySlider.value(floor(energy));
+    }
+
+    // ★ OFFLINE 的唯一触发条件：energy归零。
+    // 不检测人脸消失，不检测其他任何东西——就是这一个数字判断。
+    if(energy <= 0){
+      captureFrozenFrame();
+      systemState = 'FREEZING';
+      freezeStartTime = millis();
+    }
+
+  }else if(systemState === 'FREEZING'){
+    if(millis() - freezeStartTime > FREEZE_DURATION_MS){
+      systemState = 'OFFLINE';
+    }
+  }
+  // systemState === 'OFFLINE'：什么都不做，停在这里，
+  // 等外部调用 setSystemOnline()（之后是socket的'systemOnline'事件）
+}
+
+
+// ── captureFrozenFrame() ─────────────────────────────────────────────
+// energy归零那一刻调用一次：把videoLayer此刻的画面（已经是灰度、遮罩过的）
+// 复制进 frozenFrame，之后FREEZING阶段一直显示这张静态快照，
+// 不再继续更新——这就是"瞬间冻结"的实现方式。
+function captureFrozenFrame(){
+  frozenFrame.clear();
+  frozenFrame.image(videoLayer, 0, 0);
+}
+
+
+// ── drawFreezingScreen() ─────────────────────────────────────────────
+// FREEZING阶段：只显示冻结的视频快照（用阶段2的最低透明度），
+// 不画网格、不画线、不画flash——全部"冻结然后消失"，只剩这一帧脸。
+function drawFreezingScreen(){
+  background(0);
+  if(frozenFrame){
+    push();
+    tint(255, LOCKED_VIDEO_ALPHA_S2_FLOOR);  // 用阶段2的下限透明度(20)，"疲惫的脸"的观感
+    image(frozenFrame, 0, 0);
+    noTint();
+    pop();
+  }
+
+  // 调试用：显示倒计时，方便你确认FREEZE_DURATION_MS的时长手感对不对
+  // （正式演出前可以删掉这几行，不影响功能）
+  push();
+  noStroke(); fill(80); textAlign(LEFT,TOP); textSize(11); textFont('monospace');
+  let remain = max(0, FREEZE_DURATION_MS - (millis()-freezeStartTime));
+  text("FREEZING... " + (remain/1000).toFixed(1) + "s", 15, 15);
+  pop();
+}
+
+
+// ── drawOfflineScreen() ───────────────────────────────────────────────
+// 纯黑 + 极简一行文字。不显示错误码，不显示灯箱那句感谢语——
+// 那句话是灯箱的责任，这个屏幕只负责"系统离线"这个事实本身。
+function drawOfflineScreen(){
+  background(0);
+  push();
+  noStroke();
+  fill(230);  // 冷白/近白，克制，不是刺眼的纯白
+  textAlign(CENTER, CENTER);
+  textFont('monospace');
+  textSize(min(width, height) * 0.032);  // 相对屏幕尺寸，不同投影分辨率都合适
+  text("SYSTEM OFFLINE", width/2, height/2);
+  pop();
+}
+
+
+// ── setSystemOnline() ─────────────────────────────────────────────────
+// 之后socket.io的'systemOnline'事件会调用这个函数来恢复系统。
+// 现在：键盘 R 键手动调用，测试"从OFFLINE恢复"的完整流程。
+function setSystemOnline(){
+  systemState = 'ONLINE';
+  energy = 100;
+  flashIntensity = 0;
+  if(energySlider) energySlider.value(100);
+  lastEnergyActionTime = millis();
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+//  triggerFlash() —— 触摸事件触发的线描闪亮（阶段1：单次冷白过曝）
+//
+//  现在：T 键（通过onTouch()）或直接调用来手动测试
+//  7/19 之后：socket.io 的 'triggerSugar' 事件通过 onTouch() 调用这个函数
+//
+//  调用一次 → flashIntensity 跳回1.0 → draw()里每帧×0.92衰减
+//  阶段2时，drawFace()里会在这个基础上再叠加"不稳定频闪"的随机调制
+// ══════════════════════════════════════════════════════════════════════
+
+function triggerFlash(){
+  flashIntensity = 1.0;
+}
+
+
+function drawVideoLayer(videoAlphaTarget){
+  // a 现在直接来自 energy 状态机算出的 stage.videoAlpha（0-255制），
+  // 不再有独立滑块——阶段1恒定80，阶段2从80滑向20
+  let a = videoAlphaTarget;
+  if(a <= 0) return;
+
+  // 还没检测到脸时：不画视频。
+  //
+  // 这一版之前会在这里画一个"没对齐、直接拉伸"的视频占位画面，
+  // 用来提示"摄像头在工作"。但这次新加了"只保留脸部区域可见"的
+  // 要求——没有脸就没有遮罩中心可以参考，硬画一个未遮罩的全屏视频
+  // 会违反这条规则（房间背景会整个露出来）。所以现在的逻辑是：
+  // 没检测到脸 = 没有"标本"可显示 = 屏幕保持黑，等脸出现。
+  if(smooth.length < 2) return;
+
+  let nose = smooth[1];   // 鼻子的关键点，和 pt() 里用的完全一样
+
+  videoLayer.clear();     // 清空离屏画布，避免上一帧残留
+
+  videoLayer.push();
+
+  // ─── 和 pt() 完全相同的三步坐标变换，再加镜像 ───────────────────
+  videoLayer.translate(width/2, height/2);
+  videoLayer.scale(autoZoom, autoZoom);
+  videoLayer.translate(-nose.x, -nose.y);
+  videoLayer.translate(640, 0);
+  videoLayer.scale(-1, 1);
+
+  // ─── 这一轮新加：根据"细节强化"滑块调节局部对比度 ───────────────
+  // 注意：之前的版本用 url(#unsharpMask) 引用 SVG 滤镜来做反锐化蒙版。
+  // 但 Chrome 在 canvas 2D 的 drawingContext.filter 里处理 url() 不稳定——
+  // 如果整条 filter 字符串里有一个值无法解析，整条链可能被当作无效，
+  // 导致图像完全不绘制或绘制但没有颜色处理。
+  //
+  // 现在改成：把 detailSlider 的值加进 contrast 里（增强局部对比度的近似）。
+  // 不是严格的反锐化蒙版，但视觉上接近——对比度越高，
+  // 皮肤纹理、阴影边缘就越容易显现出来，而且完全可靠。
+  let D = map(detailSlider.value(), 0, 100, 0, 0.85);
+  let B = map(brightSlider.value(),   0, 100, 0.0, 1.0).toFixed(2);
+  let finalC = (map(contrastSlider.value(), 0, 100, 0.2, 1.2) + D).toFixed(2);
+
+  // 只保留绝对可靠的 CSS 标准滤镜，去掉 url() 引用
+  videoLayer.drawingContext.filter = `grayscale(1) brightness(${B}) contrast(${finalC})`;
+  videoLayer.image(video, 0, 0, 640, 480);    // 原始分辨率，不拉伸
+  videoLayer.drawingContext.filter = 'none';
+
+  videoLayer.pop();   // 退出"脸部坐标空间"变换，回到普通的屏幕像素坐标
+
+  // ─── 噪点颗粒：现在画在 videoLayer 缓冲区里（不是主画布）───────
+  // 这样噪点会和视频一起被下面的 applyFaceMask() 裁掉脸外的部分，
+  // 达到"噪点只在脸部范围内出现"的效果，不需要额外写遮罩逻辑。
+  drawGrainInto(videoLayer, a);
+
+  // ─── 遮罩：只留脸部区域，其余压黑 ────────────────────────────
+  applyFaceMask(videoLayer);
+
+  // ─── 叠加到主画布 ──────────────────────────────────────────────
+  push();
+  tint(255, a);
+  image(videoLayer, 0, 0);
+  noTint();
+  pop();
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+//  drawGrainInto() —— 动态噪点颗粒，画进指定的缓冲区
+//
+//  和之前版本的区别：以前直接画在主画布上，现在画进 videoLayer 缓冲区，
+//  这样噪点会跟着视频一起被 applyFaceMask() 裁剪，天然只出现在脸部范围内，
+//  不需要额外写"噪点专属遮罩"的逻辑。
+//
+//  为什么 SCREEN 混合模式：
+//   SCREEN = 1-(1-a)(1-b)。噪点亮的地方让底层稍微亮一点，暗的地方不影响。
+//   效果像"传感器过载的亮点"，比 OVERLAY 更接近电子噪声的质感。
+// ══════════════════════════════════════════════════════════════════════
+
+function drawGrainInto(buf, videoAlpha){
+  let g = grainSlider.value();      // 0-50
+  if(g <= 0 || videoAlpha <= 0) return;
+
+  let maxAlpha = map(g, 0, 50, 0, 200) * (videoAlpha / 255);
+
+  noiseImg.loadPixels();
+  let px = noiseImg.pixels;
+  for(let i = 0; i < px.length; i += 4){
+    let v = random(256) | 0;
+    px[i]   = v;
+    px[i+1] = v;
+    px[i+2] = v;
+    px[i+3] = (random(maxAlpha)) | 0;
+  }
+  noiseImg.updatePixels();
+
+  buf.push();
+  buf.blendMode(SCREEN);
+  buf.image(noiseImg, 0, 0, width, height);   // 128×96 → 全屏，颗粒感来自低分辨率拉伸
+  buf.blendMode(BLEND);
+  buf.pop();
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+//  applyFaceMask() —— 把缓冲区裁剪成"只留脸部区域，其余透明"
+//
+//  原理不变：globalCompositeOperation = 'destination-in'——
+//  只保留新画的形状和已有内容重叠的部分。三种模式只是"剪刀的形状"不同：
+//
+//  MASK_MODE 0 柔边椭圆（旧版）：径向渐变，边缘大范围羽化 → 读起来像鬼影
+//  MASK_MODE 1 跟随脸部轮廓（这一轮默认）：用FACE_OVAL_IDX的36个landmark
+//              连成多边形，只加几像素的模糊做"极窄过渡"，不是大范围晕影
+//  MASK_MODE 2 矩形硬边画框：脸部包围盒，完全不羽化，纯几何硬边
+//
+//  三种模式共用 maskSlider 控制"范围大小"（椭圆半径 / 轮廓外扩比例 /
+//  矩形外扩比例），语义略有不同但都是"越大越宽松"。
+// ══════════════════════════════════════════════════════════════════════
+
+function applyFaceMask(buf){
+  buf.push();
+  buf.drawingContext.globalCompositeOperation = 'destination-in';
+
+  if(MASK_MODE === 0){
+    // ── 模式0：柔边椭圆（旧版逻辑，保留用于对比）──
+    let baseR = height * TARGET_H * 0.62;
+    let maskR = baseR * (maskSlider.value()/100);
+
+    buf.translate(width/2, height/2);
+    buf.scale(1.0, 1.32);
+
+    let grad = buf.drawingContext.createRadialGradient(0, 0, maskR*0.35, 0, 0, maskR);
+    grad.addColorStop(0,    'rgba(255,255,255,1)');
+    grad.addColorStop(0.75, 'rgba(255,255,255,1)');
+    grad.addColorStop(1,    'rgba(255,255,255,0)');
+
+    buf.drawingContext.fillStyle = grad;
+    buf.drawingContext.fillRect(-width*2, -height*2, width*4, height*4);
+
+  }else if(MASK_MODE === 1){
+    // ── 模式1：跟随脸部轮廓（硬边+极窄过渡，不是大范围晕影）──
+    //
+    // 用 FACE_OVAL_IDX 的36个点连成多边形，以自身重心为基准，
+    // 按 maskSlider 的比例整体外扩/内缩（100=贴着landmark原始轮廓，
+    // >100=往外扩一点留出安全边距，<100=往内收）。
+    let pts = FACE_OVAL_IDX.map(i => pt(i));
+    let cx = 0, cy = 0;
+    for(let p of pts){ cx += p.x; cy += p.y; }
+    cx /= pts.length; cy /= pts.length;
+
+    let scaleF = maskSlider.value() / 100;
+
+    // 只加3px模糊做"极窄过渡"——比柔边椭圆的大范围渐变窄得多，
+    // 既不是完全锯齿的硬边，也不会读成"晕影"
+    buf.drawingContext.filter = 'blur(3px)';
+    buf.noStroke();
+    buf.fill(255);
+    buf.beginShape();
+    for(let p of pts){
+      let ex = cx + (p.x - cx) * scaleF;
+      let ey = cy + (p.y - cy) * scaleF;
+      buf.vertex(ex, ey);
+    }
+    buf.endShape(CLOSE);
+    buf.drawingContext.filter = 'none';
+
+  }else{
+    // ── 模式2：矩形硬边画框（完全无羽化）──
+    let pts = FACE_OVAL_IDX.map(i => pt(i));
+    let xs = pts.map(p=>p.x), ys = pts.map(p=>p.y);
+    let minX = Math.min(...xs), maxX = Math.max(...xs);
+    let minY = Math.min(...ys), maxY = Math.max(...ys);
+    let cx = (minX+maxX)/2, cy = (minY+maxY)/2;
+    let scaleF = maskSlider.value() / 100;
+    let hw = (maxX-minX) * scaleF / 2;
+    let hh = (maxY-minY) * scaleF / 2;
+
+    buf.noStroke();
+    buf.fill(255);
+    buf.rect(cx-hw, cy-hh, hw*2, hh*2);   // 纯矩形，没有blur，没有渐变
+  }
+
+  buf.pop();   // pop 会自动恢复 globalCompositeOperation，不用手动复位
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+//  computeMeshEdges() —— 计算"哪两个landmark点算相邻"
+//
+//  做法：468个点两两算距离，小于阈值的记一条边。
+//  这是"邻近点连线"，不是MediaPipe官方的三角剖分表——原因见上面
+//  变量声明处的说明：官方表有2000多个索引，我没办法保证凭记忆
+//  完整写对，写错的连线比没有更误导人。这个替代方案视觉上同样是
+//  密集的网状结构，而且性能已经在7/18测试中验证过（14168条边时
+//  仍有61.7fps）。
+//
+//  只在必要时重新计算（每3秒一次），不是每帧都算：
+//  468×468≈22万次距离比较，虽然不算贵，但没必要每帧都做。
+// ══════════════════════════════════════════════════════════════════════
+
+function computeMeshEdges(){
+  meshEdges = [];
+  let threshSq = pow(MESH_DIST_PX * autoZoom, 2);   // 阈值跟着autoZoom缩放，脸大网格也跟着变密
+
+  let P = [];
+  for(let i=0; i<468; i++) P.push(pt(i));
+
+  for(let i=0; i<P.length; i++){
+    for(let j=i+1; j<P.length; j++){
+      let dx = P[i].x - P[j].x, dy = P[i].y - P[j].y;
+      if(dx*dx + dy*dy < threshSq) meshEdges.push([i,j]);
+    }
+  }
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+//  drawMeshLayer() —— 画原始三角网格层（中间层，视频和优雅单线之间）
+//
+//  性能优化说明（对应你问的"太耗性能怎么办"）：
+//  如果 FPS 掉下来了，把顶部 MESH_SKIP 常量从 1 改成 2 或 3：
+//    MESH_SKIP=1 → 画全部边（默认，最密）
+//    MESH_SKIP=2 → 隔一条画一条（边数减半，视觉上网格变稀疏但仍然密集）
+//    MESH_SKIP=3 → 画三分之一
+//  这是最简单粗暴但最有效的优化——不改变算法，只是跳着画。
+// ══════════════════════════════════════════════════════════════════════
+
+function drawMeshLayer(chaos){
+  // mPct 不再是滑块——网格alpha现在是锁定常量 LOCKED_MESH_ALPHA(30)
+  if(smooth.length < 2) return;
+
+  // 邻接关系每3秒重算一次，位置每帧都用当前的pt()重新取，跟手实时
+  if(!meshEdges || millis() - lastMeshCompute > MESH_RECOMPUTE_MS){
+    computeMeshEdges();
+    lastMeshCompute = millis();
+  }
+  if(!meshEdges || meshEdges.length === 0) return;
+
+  meshLayer.clear();
+  meshLayer.stroke(160, 205, 255, 255);
+  meshLayer.strokeWeight(LOCKED_MESH_WIDTH);   // 锁定0.5px，不再随alpha变化
+  meshLayer.noFill();
+
+  // ── 阶段2：网格"抽搐式断裂和重连"（不是变粗/变淡，是接触不良）──
+  // 做法：chaos越大，每条边这一帧被随机跳过（本帧不画）的概率越高。
+  // 因为每帧概率独立重新掷骰子，视觉上就是网格在闪烁断开又重新连上，
+  // 像接触不良的电路，而不是均匀地变淡。
+  // chaos=0时dropoutProb=0（阶段1完全不受影响，一条边都不跳过）。
+  let dropoutProb = chaos * 0.55;  // 最大时约55%的边在任一帧被跳过
+
+  for(let e=0; e<meshEdges.length; e+=MESH_SKIP){
+    if(dropoutProb > 0 && random() < dropoutProb) continue;  // "接触不良"：这条边这一帧断开
+    let a = pt(meshEdges[e][0]), b = pt(meshEdges[e][1]);
+    meshLayer.line(a.x, a.y, b.x, b.y);
+  }
+
+  applyFaceMask(meshLayer);   // 同一把"剪刀"，裁成只留脸部区域
+
+  push();
+  tint(255, LOCKED_MESH_ALPHA);   // 锁定常量30，不再是滑块
+  image(meshLayer, 0, 0);
+  noTint();
+  pop();
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+//  drawFace() —— 两遍绘制
+//   第一遍：辉光（一整条 shape，粗、淡、shadowBlur）
+//   第二遍：主线（逐段变宽，无 shadowBlur，性能才够）
+// ══════════════════════════════════════════════════════════════════════
+
+function drawFace(chaos){
+  // chaos: 0-1，来自 energy 状态机的 getStageParams()。
+  // 0 = 阶段1（完全精准，无漂移无频闪）；越接近1 = 阶段2越深的衰竭。
+  noFill();
+
+  // LINE_W 和 completeness 现在是锁定常量，不再从滑块读——
+  // "工业级断裂虚线"是固定的美学基调，不随任何东西变流畅。
+  let completeness = LOCKED_COMPLETENESS;
+
+  // ── Flash 强度 ──
+  // 阶段1（chaos=0）：flashIntensity 原样使用，单次触摸=100%强度冷白过曝
+  // 阶段2（chaos>0）：叠加"不稳定随机频闪"——不是单调衰减，而是不规则跳动
+  let flashFactor = flashIntensity;
+  if(chaos > 0){
+    let flicker = 0.15 + noise(frameCount*0.6, 77) * 1.6;  // 大约0.15~1.75之间浮动
+    flashFactor *= lerp(1, flicker, chaos);
+  }
+
+  // 辉光强度（还没锁定，继续用滑块）
+  let glowFactor = glowSlider.value() / 100;
+
+  // ── 颜色逻辑——自定义纯色（按钮：冷白/纯白） vs 渐变色板（1/2/3键，调试用）──
+  let strokeStyleValue, glowColorStr;
+  if(customColor){
+    strokeStyleValue = `rgb(${customColor[0]},${customColor[1]},${customColor[2]})`;
+    glowColorStr      = `rgba(${customColor[0]},${customColor[1]},${customColor[2]},0.75)`;
+  }else{
+    let P = PALETTES[PALETTE];
+    let g = drawingContext.createLinearGradient(0, height*0.18, 0, height*0.85);
+    g.addColorStop(0,    `rgb(${P.stops[0]})`);
+    g.addColorStop(0.45, `rgb(${P.stops[1]})`);
+    g.addColorStop(1,    `rgb(${P.stops[2]})`);
+    strokeStyleValue = g;
+    glowColorStr      = P.glow;
+  }
+
+  // 先把所有要画的折线算出来（算一次，两遍绘制共用）
+  // 注意：主脸部路径传入 chaos，让阶段2产生"坐标延迟和漂移"；
+  // 耳朵/头发不传chaos（内部走pt()而非toSmoothPoly，本来就不受影响）。
+  let polys = [];
+
+  if(SHOW_TRAVEL){
+    polys.push({ poly: toSmoothPoly(PATH_BASE, 5, chaos), w: LINE_W, seed: 1 });
+  }else{
+    const SEGS = [
+      PATH_BASE.slice(0,37), PATH_BASE.slice(37,42), PATH_BASE.slice(42,49),
+      PATH_BASE.slice(49,54), PATH_BASE.slice(54,60), PATH_BASE.slice(60,66),
+      PATH_BASE.slice(66,73), PATH_BASE.slice(73,94), PATH_BASE.slice(94)
+    ];
+    for(let s=0;s<SEGS.length;s++){
+      polys.push({ poly: toSmoothPoly(SEGS[s],5, chaos), w: LINE_W, seed: s*13+1 });
+    }
+  }
+
+  if(DETAIL >= 1){
+    for(let k=0;k<PATH_D1.length;k++)
+      polys.push({ poly: toSmoothPoly(PATH_D1[k],5, chaos), w: LINE_W*0.62, seed: 200+k*9 });
+  }
+  if(DETAIL >= 2){
+    for(let k=0;k<PATH_D2.length;k++)
+      polys.push({ poly: toSmoothPoly(PATH_D2[k],5, chaos), w: LINE_W*0.48, seed: 400+k*9 });
+  }
+
+  // 耳朵、头发：不受chaos影响，始终精准（简化设计，见函数顶部说明）
+  if(SHOW_EARS){
+    polys.push({ poly: earPoly(234,false), w: LINE_W*0.85, seed: 610 });
+    polys.push({ poly: earPoly(454,true),  w: LINE_W*0.85, seed: 640 });
+  }
+  if(SHOW_HAIR){
+    let hs = hairPolys();
+    for(let k=0;k<hs.length;k++)
+      polys.push({ poly: hs[k], w: LINE_W*0.7, seed: 800+k*17 });
+  }
+
+
+  // ══ 第一遍：辉光（flash在这里最明显——shadowBlur半径剧烈扩张）══
+  if(SHOW_GLOW && glowFactor > 0){
+    let blurRadius = 22 + flashFactor * 58;
+    drawingContext.shadowBlur  = blurRadius;
+    drawingContext.shadowColor = glowColorStr;
+    stroke(255);
+    drawingContext.strokeStyle = strokeStyleValue;
+    // 主线alpha现在锁定为1.0（完全不透明）——"变淡"不是这个方向的机制
+    drawingContext.globalAlpha = (0.35 + glowFactor * 0.4);
+    strokeWeight(LINE_W * (1.5 + flashFactor * 1.2));
+    for(let item of polys){
+      beginShape();
+      for(let p of item.poly) vertex(p.x, p.y);
+      endShape();
+    }
+    drawingContext.shadowBlur = 0;
+  }
+
+  // ══ 第二遍：主线（flash在这里通过线宽变化体现）══
+  drawingContext.globalAlpha = 1.0;
+  stroke(255);
+  drawingContext.strokeStyle = strokeStyleValue;
+  for(let item of polys){
+    let w = item.w * (1 + flashFactor * 0.6);
+    drawPressureLine(item.poly, w, item.seed, completeness);
+  }
+
+  drawingContext.globalAlpha = 1.0;
+  drawingContext.shadowBlur  = 0;
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+//  earPoly() —— 耳朵
+//  沿用你旧版的方法：以脸的「上方向」为参考，在锚点上挂一个小形状。
+//  尺寸只有 earScale 的 0.1~0.3，是贴着脸的，不是飘在外面的大弧。
+// ══════════════════════════════════════════════════════════════════════
+
+function earPoly(idx, isRight){
+  let p = pt(idx), chin = pt(152), top = pt(10);
+
+  // 「往外」= 从画面中心指向锚点
+  let ox = p.x - width/2, oy = p.y - height/2;
+  let ol = max(1, dist(0,0,ox,oy));
+  let ux = ox/ol, uy = oy/ol;
+
+  // 「往上」= 从下巴指向额头（跟着头的倾斜转）
+  let px2 = top.x - chin.x, py2 = top.y - chin.y;
+  let fl = max(1, dist(0,0,px2,py2));
+  let nx = px2/fl, ny = py2/fl;
+
+  // ★ 耳朵尺寸 = 屏幕上的实际脸高 × 比例
+  //
+  // 之前的写法 (105 * autoZoom) 是错的，而且是【反向】错的：
+  // autoZoom 和脸的大小成反比 —— 脸靠近变大时，autoZoom 会自动变小，
+  // 于是脸在变大、耳朵却在变小。所以看起来才那么怪。
+  //
+  // 正确做法：直接量屏幕上额头到下巴的距离。
+  // pt() 已经把收缩和缩放都算进去了，所以这个值天然和脸等比。
+  let faceH = dist(top.x, top.y, chin.x, chin.y);
+  let S = faceH * 0.42;
+
+  let pts = [];
+  pts.push({x:p.x, y:p.y});
+  if(isRight){
+    pts.push({x:p.x+ux*S*0.10+nx*S*0.30, y:p.y+uy*S*0.10+ny*S*0.30});
+    pts.push({x:p.x+ux*S*0.30+nx*S*0.05, y:p.y+uy*S*0.30+ny*S*0.05});
+    pts.push({x:p.x+ux*S*0.15-nx*S*0.25, y:p.y+uy*S*0.15-ny*S*0.25});
+  }else{
+    pts.push({x:p.x+ux*S*0.15-nx*S*0.25, y:p.y+uy*S*0.15-ny*S*0.25});
+    pts.push({x:p.x+ux*S*0.30+nx*S*0.05, y:p.y+uy*S*0.30+ny*S*0.05});
+    pts.push({x:p.x+ux*S*0.10+nx*S*0.30, y:p.y+uy*S*0.10+ny*S*0.30});
+  }
+  pts.push({x:p.x, y:p.y});
+
+  // 手动插值成平滑折线
+  let out = [];
+  for(let i=0;i<pts.length-1;i++){
+    let a=pts[max(0,i-1)], b=pts[i], c=pts[i+1], d2=pts[min(pts.length-1,i+2)];
+    for(let s=0;s<6;s++){
+      let t=s/6;
+      out.push({ x:curvePoint(a.x,b.x,c.x,d2.x,t), y:curvePoint(a.y,b.y,c.y,d2.y,t) });
+    }
+  }
+  return out;
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+//  hairPolys() —— 头发
+//  v3 的头发像太阳，因为：数量均匀、长度接近、方向笔直。
+//  这版：只取一半发根、长度用噪声拉开 0.3~1.8 倍、加正弦卷曲。
+// ══════════════════════════════════════════════════════════════════════
+
+function hairPolys(){
+  const ROOTS = [127,21,54,67,10,297,284,389,356];  // 只取9个，不是15个
+  let cx = width/2, cy = height/2;
+  let out = [];
+
+  // 头发长度也用同样的方式：以屏幕实际脸高为基准，而不是 autoZoom
+  let topP = pt(10), chinP = pt(152);
+  let faceH = dist(topP.x, topP.y, chinP.x, chinP.y);
+
+  for(let h=0; h<ROOTS.length; h++){
+    let r = pt(ROOTS[h]);
+    let dx = r.x-cx, dy = r.y-cy;
+    let l = max(1, dist(0,0,dx,dy));
+    dx/=l; dy/=l;
+
+    // 长度差异极大：0.3~1.8 倍。均匀长度是"太阳图案"的元凶
+    // HAIR_LEN/300 是「相对脸高的比例」，逗号句号键调的是这个比例
+    let L = faceH * (HAIR_LEN/300) * (0.30 + noise(h*7.7)*1.5);
+
+    let pts = [];
+    for(let s=0; s<=7; s++){
+      let t = s/7;
+      // 卷曲：正弦 + 噪声，而不是单调漂移
+      let curl = sin(t*PI*1.6 + h*2.1) * L * 0.30
+               + (noise(h*4.4+t*3, frameCount*0.004)-0.5) * L * 0.35;
+      pts.push({
+        x: r.x + dx*L*t + (-dy)*curl,
+        y: r.y + dy*L*t + ( dx)*curl - t*L*0.22
+      });
+    }
+
+    let poly=[];
+    for(let i=0;i<pts.length-1;i++){
+      let a=pts[max(0,i-1)],b=pts[i],c=pts[i+1],d2=pts[min(pts.length-1,i+2)];
+      for(let s=0;s<5;s++){
+        let t=s/5;
+        poly.push({x:curvePoint(a.x,b.x,c.x,d2.x,t), y:curvePoint(a.y,b.y,c.y,d2.y,t)});
+      }
+    }
+    out.push(poly);
+  }
+  return out;
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+//  HUD
+// ══════════════════════════════════════════════════════════════════════
+
+function drawHUD(stage){
+  push();
+  drawingContext.shadowBlur = 0;
+  noStroke();
+  let fps = frameRate().toFixed(0);
+  let c = fps>=25 ? color(0,210,90) : fps>=15 ? color(255,175,0) : color(255,60,60);
+
+  fill(0,0,0,175); rect(10,102,320,30,3);
+  fill(c); textSize(13); textAlign(LEFT,TOP); text("FPS "+fps, 18, 110);
+  fill(105); textSize(11);
+  text("· "+(customColor ? "自定义色" : PALETTES[PALETTE].name), 72, 112);
+
+  // ── ★ Energy / 阶段 / 系统状态——这一轮新加的核心状态显示 ──
+  fill(0,0,0,190); rect(10, 138, 380, 34, 3);
+  let stageLabel, stageColor;
+  if(energy >= 50){ stageLabel = '阶段1 完美取悦';  stageColor = color(120,220,255); }
+  else if(energy > 0){ stageLabel = '阶段2 机能衰竭'; stageColor = color(255,150,60); }
+  else { stageLabel = '阶段3 死机';  stageColor = color(255,60,60); }
+
+  fill(stageColor); textSize(13); textAlign(LEFT,TOP);
+  text("ENERGY " + energy.toFixed(1) + "  " + stageLabel, 18, 146);
+  fill(140); textSize(10);
+  let chaosStr = stage ? "  chaos=" + stage.chaos.toFixed(2) : "";
+  text("state=" + systemState + chaosStr + "  flash=" + flashIntensity.toFixed(2), 18, 163);
+
+  fill(0,0,0,175); rect(10, height-90, width-20, 80, 3);
+  fill(125); textSize(11); textAlign(LEFT,TOP);
+  text("收缩 "+CONTRACT.toFixed(2)+"   抖动 "+WOBBLE.toFixed(1)+
+       "   线宽(锁定) "+LOCKED_LINE_W.toFixed(1)+
+       "   细节层级 "+DETAIL+
+       "   头发 "+(SHOW_HAIR?"on":"off")+
+       "   耳朵 "+(SHOW_EARS?"on":"off")+
+       "   辉光 "+(SHOW_GLOW?"on":"off")+
+       "   过渡线 "+(SHOW_TRAVEL?"on":"off"), 20, height-82);
+  fill(115); textSize(11);
+  let maskModeNames = ['柔边椭圆','跟随脸部轮廓(锁定)','矩形硬边画框'];
+  text("遮罩 "+maskModeNames[MASK_MODE]+"（M调试）"+
+       "   遮罩范围 "+maskSlider.value()+
+       "   细节强化 "+detailSlider.value(), 20, height-64);
+  fill(115); textSize(11);
+  text("网格(锁定) 宽"+LOCKED_MESH_WIDTH+"/alpha"+LOCKED_MESH_ALPHA+
+       "   网格密度 1/"+MESH_SKIP+
+       "   辉光 "+glowSlider.value()+
+       "   完整度(锁定) "+LOCKED_COMPLETENESS+
+       (meshEdges ? "   边数 "+meshEdges.length : ""), 20, height-46);
+  fill(72); textSize(10);
+  text("[T]★模拟触摸  [R]★恢复online  [←→]收缩  [↑↓]抖动  [D]细节  [H]发 [E]耳 [G]光 [Y]过渡线 [M]遮罩(调试)  [1/2/3]色  [S]存图",
+       20, height-27);
+  pop();
+  noFill();
+}
+
+
+function keyPressed(){
+  let k = key.toUpperCase();
+  if(k==='H') SHOW_HAIR = !SHOW_HAIR;
+  if(k==='E') SHOW_EARS = !SHOW_EARS;
+  if(k==='G') SHOW_GLOW = !SHOW_GLOW;
+  if(k==='Y') SHOW_TRAVEL = !SHOW_TRAVEL;   // 过渡线开关：从T挪到Y（T现在是模拟触摸）
+  if(k==='D') DETAIL = (DETAIL+1)%3;
+  if(k==='M'){ MASK_MODE = (MASK_MODE+1)%3; refreshMaskBtnStyles(); }  // 调试用，正式已锁定为1
+  if(k==='1'){ PALETTE=0; customColor=null; }
+  if(k==='2'){ PALETTE=1; customColor=null; }
+  if(k==='3'){ PALETTE=2; customColor=null; }
+  if(k==='S') saveCanvas('swarm_energy_'+floor(energy), 'png');
+
+  // ★★★ 这一轮新加的两个测试键 ★★★
+  if(k==='T') onTouch();          // 模拟一次触摸：flash + 消耗能量（之后是socket事件调用onTouch）
+  if(k==='R') setSystemOnline();  // 模拟server发来的systemOnline：从OFFLINE恢复，energy重置100
+
+  if(k===',') HAIR_LEN = max(20, HAIR_LEN-10);
+  if(k==='.') HAIR_LEN = min(300, HAIR_LEN+10);
+
+  if(keyCode===LEFT_ARROW)  CONTRACT = max(0,    CONTRACT-0.02);
+  if(keyCode===RIGHT_ARROW) CONTRACT = min(0.40, CONTRACT+0.02);
+  if(keyCode===UP_ARROW)    WOBBLE   = min(8, WOBBLE+0.3);
+  if(keyCode===DOWN_ARROW)  WOBBLE   = max(0, WOBBLE-0.3);
+  return false;
+}
+
+</script>
+</body>
+</html>
