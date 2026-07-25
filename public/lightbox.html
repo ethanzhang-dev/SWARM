@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+
+<title>SWARM</title>
+
+<script src="https://cyber-swarm-backend.onrender.com/socket.io/socket.io.js"></script>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
+
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  width: 100vw; height: 100vh;
+  overflow: hidden;
+  background: #080808;
+  user-select: none; -webkit-user-select: none;
+  touch-action: none;
+  overscroll-behavior: none;
+  cursor: none;
+}
+
+body {
+  font-family: 'Share Tech Mono', 'Courier New', 'Lucida Console', monospace;
+  color: #FF8C00;
+}
+
+/* CRT 扫描线 */
+body::after {
+  content: '';
+  position: fixed; inset: 0;
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent, transparent 3px,
+    rgba(0,0,0,0.1) 3px, rgba(0,0,0,0.1) 6px
+  );
+  pointer-events: none;
+  z-index: 100;
+}
+
+/* 装饰线 */
+.rule {
+  position: fixed; left: 3vw; right: 3vw; height: 1px;
+  background: linear-gradient(
+    to right,
+    transparent,
+    rgba(255,140,0,0.2) 20%, rgba(255,140,0,0.2) 80%,
+    transparent
+  );
+  z-index: 10;
+}
+.rule--top    { top: 10px; }
+.rule--bottom { bottom: 10px; }
+
+/* 滚动文字 */
+.ticker {
+  position: fixed; inset: 0;
+  display: flex; align-items: center;
+  overflow: hidden; z-index: 1;
+}
+
+#track {
+  white-space: nowrap;
+  will-change: transform;
+  font-size: clamp(1.6rem, 5.5vh, 5rem);
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  text-shadow:
+    0 0 4px  rgba(255,140,0,0.55),
+    0 0 14px rgba(255,140,0,0.18),
+    0 0 30px rgba(255,100,0,0.06);
+}
+
+@keyframes flicker {
+  0%, 91%, 100% { opacity: 1; }
+  92% { opacity: 0.84; }
+  93% { opacity: 0.96; }
+  94% { opacity: 0.76; }
+  95% { opacity: 0.93; }
+}
+#track { animation: flicker 11s ease-in-out infinite; }
+
+/* 竖屏提醒 */
+@media (orientation: portrait) {
+  body::before {
+    content: 'ROTATE DEVICE';
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-family: inherit; color: #FF8C00;
+    opacity: 0.35; font-size: 1rem; letter-spacing: 0.25em;
+    z-index: 200;
+  }
+}
+
+/* 连接状态灯（左上角，4px，观众不会注意） */
+#dot {
+  position: fixed; top: 5px; left: 5px;
+  width: 4px; height: 4px; border-radius: 50%;
+  background: #222; z-index: 50;
+  transition: background 0.6s;
+}
+#dot.on  { background: #1a3a1a; }
+#dot.off { background: #3a1a1a; }
+</style>
+</head>
+<body>
+
+<div class="rule rule--top"></div>
+<div class="rule rule--bottom"></div>
+<div id="dot"></div>
+<div class="ticker"><div id="track"></div></div>
+
+<script>
+// ============================================================
+//  SWARM · 灯箱 · 最终版（含全部隐患修复）
+//  2026-07-23
+//
+//  修复记录：
+//  ① sock.on('touch') 删除——服务器从不广播该事件，死代码
+//  ② 阶段判断改用 cycleProgress（0→1）而非 energy
+//     energy 因触摸 +6 永远被顶住，灯箱阶段永远不变
+//     cycleProgress = cycleTouches/150，每摸一下往上涨
+//  ③ 触摸计数改从 d.contribution 同步
+//     服务器没有 touchCount 字段，有 contribution（4471902起）
+//
+//  URL 参数（展场调参不用改代码）：
+//    ?speed=100          滚动速度(px/s)，默认85
+//    ?gap=2000           消息间隔(ms)，默认2500
+//    ?phase=premonition  强制初始阶段（测试用）
+//    ?count=500          模拟已有500次触摸
+//
+//  控制台调试（F12 → Console）：
+//    debugPhase('revelation')
+//    debugCount(100)
+//    debugSpeed(120)
+//    debugGap(1000)
+// ============================================================
+
+
+// ── URL 参数读取 ──────────────────────────────────────────
+
+const P = new URLSearchParams(window.location.search);
+const pi = (k, d) => { const v = P.get(k); return v !== null ? parseInt(v,10) : d; };
+const ps = (k, d) => P.get(k) || d;
+
+
+// ── 配置 ──────────────────────────────────────────────────
+
+const CFG = {
+  server:    'https://cyber-swarm-backend.onrender.com',
+  baseCount: 4471902,           // 与 server.js CONTRIBUTION_START 一致
+  speed:     pi('speed', 85),   // px/s
+  gap:       pi('gap', 2500),   // ms
+
+  // cycleProgress 阶段阈值（服务器已确认广播此字段）
+  // cycleProgress = cycleTouches / 150，从 0 涨到 1
+  // < 0.40 → 阶段1（前 60 次触摸）   约 60 秒
+  // < 0.73 → 阶段2（第 61-109 次）   约 50 秒
+  // ≥ 0.73 → 阶段3（第 110-150 次）  约 40 秒
+  p1: 0.40,
+  p2: 0.73,
+};
+
+
+// ── 三阶段文案 ────────────────────────────────────────────
+//
+// {COUNT} 会被替换为实时累积计数（格式：4,471,933）
+//
+// 设计原则（Swift 方法）：
+// 每句话脱离语境读完全正当甚至友善。
+// 恐怖从不来自文字本身，而来自观众意识到
+// "the system"和"it"指的是坐在那里的那个人。
+
+const COPY = {
+
+  // 阶段1 · INDUCTION（诱导期）
+  // energy 充足 · 温暖、游戏化、无害
+  induction: [
+    'Touch to sustain.',
+    'Every touch counts.',
+    'You\'re doing great.',
+    'The system is grateful.',
+    'Your care keeps it alive.',
+    'Please continue.',
+    'Connection active.',
+  ],
+
+  // 阶段2 · PREMONITION（预兆期）
+  // 语域从"游戏"滑向"劳动"
+  // 数字太大、被记录的暗示
+  premonition: [
+    'Contribution #{COUNT}.',
+    'Your care has been noted.',
+    'Average session: 14 hours.',   // 内容审核员真实班次时长
+    'Sustained uptime: 97.3%.',
+    'Your input improves the system.',
+    'A replacement is available if needed.',
+    'Breaks are available upon request.',
+    'Your wellbeing is important to us.',
+  ],
+
+  // 阶段3 · REVELATION（揭示期）
+  // 第一句必须在最前——进入阶段3第一条必然出现
+  // 同样的温柔语气，意义全部翻转
+  revelation: [
+    'Thank you for keeping the system alive.',  // ← 核心句，第一位
+    'Supply depleted. Please stand by.',
+    'Session complete. Your contribution has been recorded.',
+    'The system will resume shortly.',
+    'Downtime is temporary.',
+    'Your patience is appreciated.',
+    'All contributions have been recorded.',
+  ],
+};
+
+
+// ── 状态 ──────────────────────────────────────────────────
+
+let phase   = ps('phase', 'induction');
+let msgIdx  = 0;
+let touches = pi('count', 0);   // 本地触摸计数（从 triggerSugar 事件累积）
+let offline = false;
+let busy    = false;
+
+const track = document.getElementById('track');
+const dot   = document.getElementById('dot');
+
+
+// ── Socket.io ─────────────────────────────────────────────
+
+let sock = null;
+
+try {
+  sock = io(CFG.server, {
+    reconnection: true,
+    reconnectionDelay: 2000,
+    reconnectionAttempts: Infinity,
+  });
+} catch(e) {
+  console.warn('[灯箱] Socket.io 未加载，离线演示模式');
+}
+
+if (sock) {
+
+  sock.on('connect', () => {
+    console.log('[灯箱] ✓ 已连接');
+    dot.className = 'on';
+  });
+
+  sock.on('disconnect', () => {
+    console.log('[灯箱] ✗ 断开');
+    dot.className = 'off';
+  });
+
+  // ── state 事件 ──────────────────────────────────────────
+  // 服务器广播字段（已从 server.js 确认）：
+  //   energy, totalTouches, cycleTouches,
+  //   cycleProgress, contribution, status, threshold
+  //
+  // ★ 阶段判断用 cycleProgress，不用 energy
+  //   原因：energy 因 ENERGY_PER_TOUCH=6 被持续顶住，
+  //   观众正常触摸时 energy 净增，永远不会掉到阈值以下。
+  //   cycleProgress 只增不减，是"观众已消耗多少"的真实反映。
+
+  function handleState(d) {
+    // 从服务器 contribution 同步计数（比本地 +1 更准确）
+    if (d.contribution && d.contribution > CFG.baseCount + touches) {
+      touches = d.contribution - CFG.baseCount;
+    }
+
+    if (!offline) {
+      const p = d.cycleProgress ?? 0;
+      if      (p < CFG.p1) setPhase('induction');
+      else if (p < CFG.p2) setPhase('premonition');
+      else                 setPhase('revelation');
+    }
+  }
+
+  // 同时监听两个事件名（兼容服务器可能的名称变化）
+  sock.on('state',       handleState);
+  sock.on('stateUpdate', handleState);
+
+  // ── 触摸计数 ────────────────────────────────────────────
+  // ★ 只监听 triggerSugar
+  //   服务器收到手机的 touch 事件后，只广播 triggerSugar（和 triggerKnife）
+  //   从不把 touch 原样转发——所以 sock.on('touch') 是死代码，已删除
+
+  sock.on('triggerSugar', () => { touches++; });
+
+  // ── 系统 OFFLINE ─────────────────────────────────────────
+  // 两种触发：cycleTouches >= 150（阈值），或 energy 自然衰减到 0
+  sock.on('systemOffline', () => {
+    console.log('[灯箱] ▼ OFFLINE');
+    offline = true;
+    setPhase('revelation');
+  });
+
+  // ── 系统恢复 ─────────────────────────────────────────────
+  // 20 秒后自动恢复，回到阶段1
+  // 最恐怖的部分：一切重新开始，就像什么都没发生过
+  sock.on('systemOnline', () => {
+    console.log('[灯箱] ▲ ONLINE');
+    offline = false;
+    setPhase('induction');
+  });
+}
+
+
+// ── 阶段切换 ──────────────────────────────────────────────
+
+function setPhase(p) {
+  if (p === phase) return;
+  console.log('[灯箱] ' + phase + ' → ' + p);
+  phase  = p;
+  msgIdx = 0;
+}
+
+
+// ── 获取下一条消息 ────────────────────────────────────────
+
+function nextMessage() {
+  const pool = COPY[phase];
+  const raw  = pool[msgIdx % pool.length];
+  msgIdx++;
+  const n = CFG.baseCount + touches;
+  return raw.replace('{COUNT}', n.toLocaleString('en-US'));
+}
+
+
+// ── 滚动动画 ──────────────────────────────────────────────
+// CSS transform（GPU 合成层，不触发重排，旧平板也流畅）
+// 文字从右侧外进入 → 匀速滑到左侧外消失 → 停顿 → 下一条
+
+function scroll() {
+  if (busy) return;
+  busy = true;
+
+  track.textContent = nextMessage();
+  track.style.transition = 'none';
+  track.style.transform  = 'translateX(' + window.innerWidth + 'px)';
+  void track.offsetWidth;   // 强制重排，让 transform 立即生效
+
+  const textW   = track.offsetWidth;
+  const dist    = window.innerWidth + textW;
+  const seconds = dist / CFG.speed;
+
+  track.style.transition = 'transform ' + seconds + 's linear';
+  track.style.transform  = 'translateX(-' + textW + 'px)';
+
+  let handled = false;
+  function done() {
+    if (handled) return;
+    handled = true;
+    track.removeEventListener('transitionend', done);
+    busy = false;
+    setTimeout(scroll, CFG.gap);
+  }
+  track.addEventListener('transitionend', done);
+  setTimeout(done, (seconds + 0.5) * 1000);   // 兜底，防止卡死
+}
+
+
+// ── 全屏（第一次触摸时触发） ──────────────────────────────
+
+document.addEventListener('touchstart', function goFull() {
+  const el  = document.documentElement;
+  const rfs = el.requestFullscreen || el.webkitRequestFullscreen;
+  if (rfs) try { rfs.call(el); } catch(_) {}
+}, { once: true });
+
+
+// ── 防休眠 ────────────────────────────────────────────────
+
+async function wakeLock() {
+  if (!('wakeLock' in navigator)) return;
+  try {
+    await navigator.wakeLock.request('screen');
+    console.log('[灯箱] ✓ 防休眠已激活');
+  } catch(_) {}
+  document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState === 'visible') {
+      try { await navigator.wakeLock.request('screen'); } catch(_) {}
+    }
+  });
+}
+
+
+// ── 启动 ──────────────────────────────────────────────────
+
+wakeLock();
+scroll();
+
+console.log([
+  '',
+  '╔══════════════════════════════════════════╗',
+  '║   SWARM · 灯箱 · 最终版（修复后）       ║',
+  '╠══════════════════════════════════════════╣',
+  '║  服务器: ' + CFG.server,
+  '║  滚动速度: ' + CFG.speed + ' px/s',
+  '║  消息间隔: ' + CFG.gap + ' ms',
+  '║  初始阶段: ' + phase,
+  '║  计数基数: ' + CFG.baseCount.toLocaleString(),
+  '╠══════════════════════════════════════════╣',
+  '║  阶段阈值（cycleProgress）:              ║',
+  '║    < 0.40 → 诱导期（前60次触摸）        ║',
+  '║    < 0.73 → 预兆期（第61-109次）        ║',
+  '║    ≥ 0.73 → 揭示期（第110-150次）       ║',
+  '╠══════════════════════════════════════════╣',
+  '║  调试命令:                               ║',
+  '║    debugPhase("revelation")              ║',
+  '║    debugCount(100)                       ║',
+  '║    debugSpeed(120)                       ║',
+  '║    debugGap(1000)                        ║',
+  '╚══════════════════════════════════════════╝',
+  '',
+].join('\n'));
+
+
+// ── 调试接口 ──────────────────────────────────────────────
+
+window.debugPhase = p => {
+  if (!COPY[p]) return console.log('可用: induction / premonition / revelation');
+  offline = (p === 'revelation');
+  setPhase(p);
+};
+window.debugCount = n => {
+  touches += (n || 1);
+  console.log('累积计数: ' + (CFG.baseCount + touches).toLocaleString());
+};
+window.debugSpeed = s => { CFG.speed = s; console.log('速度: ' + s); };
+window.debugGap   = ms => { CFG.gap = ms; console.log('间隔: ' + ms); };
+
+</script>
+</body>
+</html>
