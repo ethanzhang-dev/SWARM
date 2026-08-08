@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>THE WATCH · 灯光控制器</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    *{ margin:0; padding:0; box-sizing:border-box; }
+    body{ background:#080808; color:#555; font-family:'Courier New',monospace;
+          font-size:11px; padding:20px; line-height:1.8; }
+    h1{ color:#333; font-size:11px; letter-spacing:4px; margin-bottom:16px;
+        border-bottom:1px solid #1a1a1a; padding-bottom:8px; }
+    .status{ color:#0a6; margin:8px 0; letter-spacing:2px; }
+    .status.offline{ color:#640; }
+    .status.warn{ color:#880; }
+    .block{ border:1px solid #1a1a1a; padding:12px; margin:12px 0; }
+    .block h2{ color:#333; font-size:10px; letter-spacing:3px; margin-bottom:8px; }
+    .row{ display:flex; gap:8px; margin:4px 0; }
+    button{ background:transparent; border:1px solid #1a1a1a; color:#555;
+            font-family:inherit; font-size:10px; padding:6px 12px;
+            cursor:pointer; letter-spacing:2px; transition:border-color .1s; }
+    button:hover{ border-color:#333; color:#888; }
+    button.active{ border-color:#0a6; color:#0a6; }
+    #log{ height:140px; overflow-y:auto; font-size:9px; color:#333;
+          border:1px solid #111; padding:8px; background:#040404; }
+    #log .entry{ border-bottom:1px solid #0d0d0d; padding:2px 0; }
+    #log .entry.cue{ color:#0a6; }
+    #log .entry.err{ color:#640; }
+    .light-preview{ width:60px; height:60px; border-radius:50%;
+                    background:#111; border:1px solid #1a1a1a;
+                    transition:background .3s, box-shadow .3s; }
+    .light-preview.tracking{ background:#1a0a00;
+                              box-shadow:0 0 20px 4px rgba(255,160,50,.3); }
+    .light-preview.reveal{   background:#2a1a00;
+                              box-shadow:0 0 40px 8px rgba(255,160,50,.6); }
+    small{ color:#222; font-size:9px; }
+  </style>
+</head>
+<body>
+
+<h1>THE WATCH · LIGHT CONTROLLER</h1>
+
+<div class="status" id="conn-status">— 连接中 …</div>
+
+<div class="block">
+  <h2>灯态预览</h2>
+  <div class="row" style="align-items:center; gap:16px;">
+    <div class="light-preview" id="tracking-light"></div>
+    <div>
+      <div id="light-label" style="color:#333; letter-spacing:2px;">INIT</div>
+      <small id="light-sub">等待服务器连接</small>
+    </div>
+  </div>
+</div>
+
+<div class="block">
+  <h2>手动覆盖</h2>
+  <small>正常表演中无需操作 —— 服务器自动发光指令</small>
+  <div class="row" style="margin-top:8px;">
+    <button onclick="manualCue('TRACKING_ON')">追踪光 ON</button>
+    <button onclick="manualCue('TRACKING_OFF')">追踪光 OFF</button>
+  </div>
+  <div class="row">
+    <button onclick="manualCue('REVEAL_UP')">揭示光 UP</button>
+    <button onclick="manualCue('REVEAL_DOWN')">揭示光 DOWN</button>
+  </div>
+</div>
+
+<div class="block">
+  <h2>灯具配置</h2>
+  <small>
+    在下方填入灯具 API 地址后保存（刷新页面生效）<br>
+    若使用 Govee / Elgato / Philips Hue，修改 handleLightCue() 里对应的调用。
+  </small>
+  <div style="margin-top:8px;">
+    <label style="color:#333;">追踪光 API：<br>
+      <input id="tracking-api" type="text" placeholder="http://192.168.x.x:PORT/api/..."
+             style="width:100%; background:#000; border:1px solid #1a1a1a;
+                    color:#555; font-family:inherit; font-size:10px; padding:4px; margin-top:4px;">
+    </label>
+    <label style="color:#333; display:block; margin-top:8px;">揭示光 API：<br>
+      <input id="reveal-api" type="text" placeholder="http://192.168.x.x:PORT/api/..."
+             style="width:100%; background:#000; border:1px solid #1a1a1a;
+                    color:#555; font-family:inherit; font-size:10px; padding:4px; margin-top:4px;">
+    </label>
+    <button onclick="saveConfig()" style="margin-top:8px;">保存配置</button>
+  </div>
+</div>
+
+<div class="block">
+  <h2>事件日志</h2>
+  <div id="log"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
+<script>
+/* ════════════════════════════════════════════════════════════════
+   THE WATCH · light.html · 灯光控制器
+   ════════════════════════════════════════════════════════════════
+
+   用途：接收 server.js 的 lightCue 事件，自动控制展场灯具。
+   单人展场运行：打开此页面后无需任何手动操作。
+
+   lightCue 事件时间线（每次 OFFLINE 周期）：
+     t=0s     TRACKING_OFF  → 追踪光关（演员面部不再被追踪灯照亮）
+     t=7s     REVEAL_UP     → 揭示光上（观众看到演员的真实状态）
+     t=22s    REVEAL_DOWN   → 揭示光下（揭示结束，过渡至黑暗）
+     t=25s    TRACKING_ON   → 系统恢复，追踪光重新开启
+
+   智能灯具接入方式（在 handleLightCue() 里实现）：
+     A. Philips Hue → 调用 /api/<user>/lights/<id>/state
+     B. Govee WiFi  → 调用 Govee LAN API（POST /govee/v1/device/control）
+     C. Elgato      → 调用 http://<ip>:9123/elgato/lights
+     D. 通用 HTTP   → 在 TRACKING_API / REVEAL_API 字段填入地址
+     E. 无 API      → 修改 handleLightCue() 直接控制 OS 调光工具
+
+   ════════════════════════════════════════════════════════════════ */
+
+// ── 配置（从 localStorage 读取，saveConfig() 写入）──────────────
+let TRACKING_API = localStorage.getItem('light_tracking_api') || '';
+let REVEAL_API   = localStorage.getItem('light_reveal_api')   || '';
+document.getElementById('tracking-api').value = TRACKING_API;
+document.getElementById('reveal-api').value   = REVEAL_API;
+
+function saveConfig() {
+  TRACKING_API = document.getElementById('tracking-api').value.trim();
+  REVEAL_API   = document.getElementById('reveal-api').value.trim();
+  localStorage.setItem('light_tracking_api', TRACKING_API);
+  localStorage.setItem('light_reveal_api',   REVEAL_API);
+  addLog('配置已保存', 'cue');
+}
+
+// ── 灯态状态机 ─────────────────────────────────────────────────
+// tracking: 追踪光（co-axial with camera，常亮，OFFLINE 时关）
+// reveal:   揭示光（从侧上方斜照演员，OFFLINE 7s 后升，22s 后降）
+let lightState = { tracking: true, reveal: false };
+
+function setLightUI(trackingOn, revealOn) {
+  const el  = document.getElementById('tracking-light');
+  const lbl = document.getElementById('light-label');
+  const sub = document.getElementById('light-sub');
+
+  lightState.tracking = trackingOn;
+  lightState.reveal   = revealOn;
+
+  el.className = 'light-preview ' + (revealOn ? 'reveal' : trackingOn ? 'tracking' : '');
+  lbl.textContent = revealOn ? 'REVEAL' : trackingOn ? 'TRACKING' : 'DARK';
+  sub.textContent = revealOn
+    ? '揭示光亮起（演员可见）'
+    : trackingOn ? '追踪光运行（正常表演）' : '全灭（崩溃后静默期）';
+}
+
+// ── 核心：处理灯光指令 ────────────────────────────────────────
+// ★ 在这里接入你的智能灯具 API
+async function handleLightCue(action) {
+  addLog(`← lightCue: ${action}`, 'cue');
+
+  switch (action) {
+
+    case 'TRACKING_ON':
+      setLightUI(true, false);
+      // ★ 在此调用追踪光 ON 的 API
+      await callLightAPI(TRACKING_API, { on: true,  brightness: 100 });
+      break;
+
+    case 'TRACKING_OFF':
+      setLightUI(false, false);
+      // ★ 在此调用追踪光 OFF 的 API
+      await callLightAPI(TRACKING_API, { on: false });
+      break;
+
+    case 'REVEAL_UP':
+      setLightUI(false, true);
+      // ★ 在此调用揭示光 UP 的 API（渐亮）
+      await callLightAPI(REVEAL_API, { on: true,  brightness: 100, transitionTime: 20 });
+      break;
+
+    case 'REVEAL_DOWN':
+      setLightUI(false, false);
+      // ★ 在此调用揭示光 DOWN 的 API（渐灭）
+      await callLightAPI(REVEAL_API, { on: false, transitionTime: 30 });
+      break;
+  }
+}
+
+// ── 通用 HTTP 调用模板（根据你的灯具 API 修改 body 结构）───────
+async function callLightAPI(url, params) {
+  if (!url) {
+    addLog('  未配置灯具 API，跳过（仅 UI 更新）', '');
+    return;
+  }
+  try {
+    const res = await fetch(url, {
+      method : 'PUT',    // ★ Hue 用 PUT，Govee 用 POST，按需修改
+      headers: { 'Content-Type': 'application/json' },
+      body   : JSON.stringify(params),
+    });
+    addLog(`  API 响应: ${res.status}`, res.ok ? '' : 'err');
+  } catch (e) {
+    addLog(`  API 错误: ${e.message}`, 'err');
+  }
+}
+
+// 手动覆盖（供人工测试，正常表演不需要点）
+function manualCue(action) {
+  addLog(`▶ 手动覆盖: ${action}`, 'warn');
+  handleLightCue(action);
+}
+
+// ── Socket.IO 连接 ────────────────────────────────────────────
+const socket = io();
+
+socket.on('connect', () => {
+  document.getElementById('conn-status').textContent = '● 已连接 ' + socket.id.substring(0,8);
+  document.getElementById('conn-status').className   = 'status';
+  // 注册为灯控设备，服务器会发送 light:init 同步当前状态
+  socket.emit('join:lightController');
+  addLog('Socket 已连接', 'cue');
+});
+
+socket.on('disconnect', () => {
+  document.getElementById('conn-status').textContent = '○ 断线 —— 等待重连';
+  document.getElementById('conn-status').className   = 'status warn';
+  addLog('Socket 断线', 'err');
+});
+
+// 初始化：同步当前系统状态（连接时服务器发送）
+socket.on('light:init', (d) => {
+  addLog(`初始化 · isOnline=${d.isOnline} · cycle=${d.cycle}`, 'cue');
+  setLightUI(d.isOnline, false);   // 恢复后追踪光应为 ON
+});
+
+// 核心事件：接收服务器自动发出的灯光指令
+socket.on('lightCue', (d) => {
+  handleLightCue(d.action);
+});
+
+// ── 日志 ─────────────────────────────────────────────────────
+function addLog(msg, cls) {
+  const log  = document.getElementById('log');
+  const ts   = new Date().toLocaleTimeString('zh', { hour12: false });
+  const div  = document.createElement('div');
+  div.className = 'entry ' + (cls || '');
+  div.textContent = `[${ts}] ${msg}`;
+  log.insertBefore(div, log.firstChild);
+  if (log.children.length > 80) log.removeChild(log.lastChild);
+}
+</script>
+</body>
+</html>

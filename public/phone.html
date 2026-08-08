@@ -1,293 +1,379 @@
 <!DOCTYPE html>
+<!--
+╔══════════════════════════════════════════════════════════════════╗
+║  SWARM · phone.html  正式版                                      ║
+╠══════════════════════════════════════════════════════════════════╣
+║  【测试方法】                                                     ║
+║                                                                  ║
+║  A) 本地测试（默认）                                              ║
+║     1. 电脑跑 node server.js                                      ║
+║     2. 手机与电脑连同一 WiFi                                      ║
+║     3. 手机 Chrome 打开 http://10.9.3.189:3000/phone.html        ║
+║                                                                  ║
+║  B) 线上测试                                                      ║
+║     把顶部 SERVER 换成注释里的 Render 地址，重新上传              ║
+║                                                                  ║
+║  C) 验证链路                                                      ║
+║     电脑开 monitor.html，手机戳屏，调试台触摸数在涨 = 链路通     ║
+║     右下角 ● 已连服务器 / ○ 断线                                 ║
+║                                                                  ║
+║  D) 展览前唯一需要做的事                                          ║
+║     删掉 <div id="dbg"> 那一行，切换为线上 SERVER 地址            ║
+╚══════════════════════════════════════════════════════════════════╝
+-->
 <html lang="zh">
 <head>
   <meta charset="UTF-8">
-
-  <!-- ============================================================
-       视口：禁止一切缩放、保留刘海区域（viewport-fit=cover）
-       ============================================================ -->
   <meta name="viewport"
         content="width=device-width, initial-scale=1.0,
                  maximum-scale=1.0, minimum-scale=1.0,
                  user-scalable=no, viewport-fit=cover">
-
-  <!-- 加入主屏后以全屏 App 模式运行（iOS / Android） -->
-  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable"          content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="mobile-web-app-capable" content="yes">
-  <meta name="theme-color" content="#000000">
-
+  <meta name="mobile-web-app-capable"                content="yes">
+  <meta name="theme-color"                           content="#000000">
   <title>SWARM</title>
 
   <style>
-
-    /* ============================================================
-       基础：纯黑、禁止滚动、禁止一切系统默认手势
-       ============================================================ */
+    /* ── 全局重置 ─────────────────────────────────────────── */
     html, body {
       margin: 0; padding: 0;
       width: 100%; height: 100%;
       background: #000;
       overflow: hidden;
-      position: fixed;                /* 消灭 iOS 橡皮筋回弹 */
-      overscroll-behavior: none;      /* 消灭安卓下拉刷新 */
-      touch-action: none;             /* 关闭浏览器内置手势（关键！） */
+      position: fixed;
+      overscroll-behavior: none;
+      touch-action: none;
       -webkit-user-select: none;
-      user-select: none;              /* 禁止长按选文字 */
-      -webkit-touch-callout: none;    /* 禁止长按弹出菜单（iOS） */
-      -webkit-tap-highlight-color: transparent; /* 去掉点击灰块 */
+      user-select: none;
+      -webkit-touch-callout: none;
+      -webkit-tap-highlight-color: transparent;
     }
 
-    /* 触摸舞台：铺满全屏 */
-    #stage {
+    /* ── 背景呼吸辉光层（JS 每帧更新 style.background） ───── */
+    #glow {
       position: fixed;
       inset: 0;
-      background: #000;
-      overflow: hidden;
+      z-index: 0;
+      pointer-events: none;
+      background: radial-gradient(circle at 50% 50%,
+        rgba(200, 140, 60, 0.02) 0%, transparent 70%);
     }
 
-    /* ============================================================
-       暖色余烬光点
-       普通触摸：直径 180px，300ms 消散
-       大奖励  ：直径 360px，500ms 消散（服务器触发，不由客户端随机）
-       ============================================================ */
-    .ember {
+    /* ── 特效容器（压入圈 + 涟漪动态插入此处） ────────────── */
+    #fx {
+      position: fixed;
+      inset: 0;
+      z-index: 1;
+      pointer-events: none;
+    }
+
+    /* ── 压入暗圈：触摸瞬间触点变暗，持续 50ms ────────────── */
+    .press-in {
       position: absolute;
-      width: 180px;
-      height: 180px;
-      margin: -90px 0 0 -90px;       /* 让圆心对准手指位置 */
+      width:  90px;
+      height: 90px;
+      margin: -45px 0 0 -45px;
       border-radius: 50%;
-      pointer-events: none;           /* 不拦截触摸事件 */
-      background: radial-gradient(
-        circle,
-        rgba(255, 210, 130, 0.95)  0%,   /* 核心：暖白 */
-        rgba(255, 130,  30, 0.55) 32%,   /* 中层：琥珀橙 */
-        rgba(200,  50,   0, 0.18) 60%,   /* 外层：暗红余烬 */
-        rgba(  0,   0,   0, 0.00) 72%    /* 边缘：完全透明 */
-      );
-      animation: emberOut 300ms ease-out forwards;
+      pointer-events: none;
+      background: radial-gradient(circle,
+        rgba(0,0,0,0.40)  0%,
+        rgba(0,0,0,0.12) 55%,
+        transparent       80%);
+      animation: pressAnim 50ms ease-out forwards;
+    }
+    @keyframes pressAnim {
+      0%   { transform: scale(0.4); opacity: 1; }
+      100% { transform: scale(1.0); opacity: 0; }
     }
 
-    /* 大奖励变体：更大、更亮、更慢 */
-    .ember-big {
-      width: 360px;
-      height: 360px;
-      margin: -180px 0 0 -180px;
-      background: radial-gradient(
-        circle,
-        rgba(255, 230, 160, 1.00)  0%,
-        rgba(255, 160,  50, 0.65) 28%,
-        rgba(220,  70,   0, 0.22) 58%,
-        rgba(  0,   0,   0, 0.00) 70%
-      );
-      animation: emberOut 500ms ease-out forwards;
+    /* ── 琥珀涟漪：覆盖屏幕约 25% 面积（直径 324px）─────────
+       Phase1 (0→26% = 120ms)：扩展至满，保持不透明度
+       Phase2 (26→100% = 350ms)：淡出至 0
+       总时长 470ms
+       ──────────────────────────────────────────────────────── */
+    .ripple {
+      position: absolute;
+      width:  324px;
+      height: 324px;
+      margin: -162px 0 0 -162px;
+      border-radius: 50%;
+      pointer-events: none;
+      background: radial-gradient(circle,
+        rgba(255,140,  0, 0.55)  0%,
+        rgba(255, 90,  0, 0.28) 45%,
+        transparent              70%);
+      animation: rippleAnim 470ms ease-out forwards;
+    }
+    /* 大奖励涟漪（triggerSugar tier=big）*/
+    .ripple-big {
+      width:  648px;
+      height: 648px;
+      margin: -324px 0 0 -324px;
+      background: radial-gradient(circle,
+        rgba(255,180, 60, 0.65)  0%,
+        rgba(255,110,  0, 0.38) 40%,
+        transparent               68%);
+      animation: rippleAnim 600ms ease-out forwards;
+    }
+    @keyframes rippleAnim {
+      0%   { transform: scale(0.04); opacity: 0.55; }
+      26%  { transform: scale(1.00); opacity: 0.52; }
+      100% { transform: scale(1.06); opacity: 0.00; }
     }
 
-    /* 光点动画：从无到有、绽放、消散 */
-    @keyframes emberOut {
-      0%   { transform: scale(0.05); opacity: 1;   }
-      30%  { transform: scale(1);    opacity: 0.88; }
-      100% { transform: scale(1.12); opacity: 0;   }
-    }
-
-    /* ============================================================
-       调试状态指示（展览当天删掉这一块即可）
-       位于右下角，极小的灰字，几乎不可见
-       ============================================================ */
+    /* ── 调试指示（展览前删掉 <div id="dbg"> 整行） ─────────*/
     #dbg {
       position: fixed;
       bottom: calc(env(safe-area-inset-bottom, 0px) + 10px);
       right: 12px;
       font-family: monospace;
       font-size: 9px;
-      letter-spacing: 0.04em;
-      color: #2a2a2a;                 /* 近黑：调试时凑近看能看到 */
+      color: #282828;
       pointer-events: none;
       z-index: 99;
     }
-
   </style>
 </head>
 
 <body>
-  <!-- 触摸舞台：这就是整个页面 -->
-  <div id="stage"></div>
+  <div id="glow"></div>
+  <div id="fx"></div>
 
-  <!-- 调试指示：展览前删掉 <div id="dbg"> 这一行即可 -->
+  <!-- 调试指示：展览前删掉这一行 ↓ -->
   <div id="dbg">○</div>
 
-
-  <!-- ============================================================
-       Socket.io 客户端：从 CDN 加载
-       版本锁定 4.7.5，与服务器 socket.io 大版本号一致
-       ============================================================ -->
+  <!-- Socket.io CDN，版本锁 4.7.5 -->
   <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 
   <script>
 
-    // ==============================================================
-    // 【配置区】只需改这里，其他地方不用动
-    // ==============================================================
+    /* ════════════════════════════════════════════════════════
+       【配置区】切换本地 / 线上只改这两行
+       ════════════════════════════════════════════════════════ */
+    // 自动选择连接地址
+    // 本地排练（局域网 IP / localhost）→ 连本地服务器
+    // 线上展览（Render 域名）          → 连 Render
+    const LOCAL_IP = 'http://10.9.3.189:3000';
+    const IS_LOCAL = window.location.hostname === 'localhost' ||
+                     window.location.hostname === '127.0.0.1' ||
+                     window.location.hostname.startsWith('10.')  ||
+                     window.location.hostname.startsWith('192.168.');
+    const SERVER = IS_LOCAL
+      ? (window.location.origin.includes('3000') ? window.location.origin : LOCAL_IP)
+      : 'https://cyber-swarm-backend.onrender.com';
 
-    // 服务器地址：你的 Render 网址
-    // 如果将来把这个文件放回服务器的 public/ 文件夹，
-    // 可以改成 window.location.origin（自动适配）
-    const SERVER = 'https://cyber-swarm-backend.onrender.com';
+    // 是否启用 45 秒无人招揽模式
+    const ENABLE_IDLE_ATTRACT = true;
 
-    // 普通触摸震动时长（毫秒）
-    const VIB_NORMAL = 35;
+    /* ════════════════════════════════════════════════════════
+       DOM
+       ════════════════════════════════════════════════════════ */
+    const glowEl = document.getElementById('glow');
+    const fxEl   = document.getElementById('fx');
+    const dbg    = document.getElementById('dbg');
 
-    // ==============================================================
-    // 初始化
-    // ==============================================================
+    /* ════════════════════════════════════════════════════════
+       状态
+       ════════════════════════════════════════════════════════ */
+    let isOffline     = false;
+    let energy        = 50;   // 来自 state.energy (0-100)
+    let feedbackDelay = 80;   // 来自 state.fx.feedbackDelay (ms)
 
-    const stage = document.getElementById('stage');
-    const dbg   = document.getElementById('dbg');
+    // 呼吸振荡器（累积相位，切换频率时曲线不跳变）
+    let breathPhase      = 0;
+    let breathFreq       = 0.16; // 当前频率 Hz（平滑过渡中间值）
+    let breathFreqTarget = 0.16; // 目标频率 Hz（连击数决定）
+    let breathAmplitude  = 1.0;  // 振幅倍率（idle 最高 2.7）
 
-    // 系统是否处于 OFFLINE 状态（垮掉期间触摸无反馈）
-    let isOffline = false;
+    // 连击
+    let combo       = 0;
+    let lastTapTime = 0;
+    const COMBO_WIN = 400; // ms
 
-    // ==============================================================
-    // 连接服务器
-    // transports 顺序：先尝试 WebSocket，失败再降级 polling
-    // ==============================================================
-    const socket = io(SERVER, {
-      transports: ['websocket', 'polling'],
+    // Idle 招揽
+    let lastTouchTime = performance.now();
+
+    // RAF
+    let lastRafTime = null;
+
+    /* ════════════════════════════════════════════════════════
+       Socket.io 连接
+       ════════════════════════════════════════════════════════ */
+    const socket = io(SERVER, { transports: ['websocket', 'polling'] });
+
+    socket.on('connect',    () => { dbg.textContent = '●'; });
+    socket.on('disconnect', () => { dbg.textContent = '○'; });
+
+    /* ── state（每次触摸 + 每 500ms 推送）──────────────────
+       ★ isOnline === false → 系统离线（API 规范）
+       ★ energy            → 辉光基础亮度
+       ★ fx.feedbackDelay  → 本地反馈延迟时长
+       ──────────────────────────────────────────────────────*/
+    socket.on('state', s => {
+      if (!s) return;
+      setOffline(s.isOnline === false);
+      if (s.energy !== undefined)              energy        = s.energy;
+      if (s.fx && s.fx.feedbackDelay != null)  feedbackDelay = s.fx.feedbackDelay;
     });
 
-    // 连上：调试点显示「●」
-    socket.on('connect', () => {
-      dbg.textContent = '●';
+    /* ── triggerSugar──────────────────────────────────────
+       ★ tier: 'small'|'medium'|'big'（API 规范）
+       ★ 大奖励判断：payload.tier === 'big'（非旧版 payload.big）
+       ──────────────────────────────────────────────────────*/
+    socket.on('triggerSugar', payload => {
+      if (isOffline) return;
+      const tier = payload && payload.tier;
+      if (tier === 'big') {
+        const delay = feedbackDelay;
+        setTimeout(() => {
+          spawnRipple(window.innerWidth / 2, window.innerHeight / 2, true);
+          vibrate([0, 60, 40, 90]);
+        }, delay);
+      } else if (tier === 'medium') {
+        const delay = feedbackDelay;
+        setTimeout(() => vibrate(50), delay);
+      }
+      // small：触摸自身的涟漪已是完整反馈
     });
 
-    // 断线：显示「○」（socket.io 会自动不断重连，无需手动处理）
-    socket.on('disconnect', () => {
-      dbg.textContent = '○';
-    });
+    /* ── 以下事件 phone.html 不需要处理，不注册监听器 ──────
+       triggerKnife   → 仅供 display.html 声音模块使用
+       knifeToSpeakers→ 仅供 display.html 声音模块使用
+       systemOffline  → 通过 state.isOnline 判断，此事件忽略
+       systemOnline   → 通过 state.isOnline 判断，此事件忽略
+       sessionReset   → 仅供 cue.html 使用
+       lightCue       → 仅供 cue.html 使用
+       ──────────────────────────────────────────────────────*/
 
-
-    // ==============================================================
-    // 触摸处理
-    // 手指按下 → 归一化坐标 → emit('touch') → 生成光点 → 震动
-    // ==============================================================
+    /* ════════════════════════════════════════════════════════
+       触摸处理
+       ════════════════════════════════════════════════════════ */
     function onTouchStart(e) {
-      e.preventDefault(); // 阻止浏览器的所有默认行为
-
-      // 系统 OFFLINE 期间：静默，不发送，不反馈
+      e.preventDefault();
       if (isOffline) return;
 
-      // 支持多指同时触摸（changedTouches = 这次新按下的所有手指）
+      const now = performance.now();
+
+      // 连击计数
+      combo = (now - lastTapTime < COMBO_WIN) ? Math.min(combo + 1, 10) : 1;
+      lastTapTime   = now;
+      lastTouchTime = now; // 重置 idle 计时
+
+      // 目标呼吸频率（0.16 + 连击数 × 0.055）
+      breathFreqTarget = 0.16 + combo * 0.055;
+
       for (let i = 0; i < e.changedTouches.length; i++) {
-        const t = e.changedTouches[i];
+        const t  = e.changedTouches[i];
+        const px = t.clientX;
+        const py = t.clientY;
 
-        // 归一化坐标：像素位置 ÷ 屏幕宽高，得到 0~1 的小数
-        const x = clamp(t.clientX / window.innerWidth,  0, 1);
-        const y = clamp(t.clientY / window.innerHeight, 0, 1);
+        /* ★★★ socket.emit 必须在 setTimeout 外部立即发送 ★★★
+           服务器收到 touch 不应被 feedbackDelay 延迟
+           只有本地视觉 + 震动才进 setTimeout               */
+        socket.emit('touch');
 
-        // ★ 发送给服务器（接口字段：touch / {x, y}，不得改动）
-        socket.emit('touch', { x, y });
-
-        // 在手指位置生成暖色余烬光点
-        spawnEmber(t.clientX, t.clientY, false);
-
-        // 普通触摸震动
-        vibrate(VIB_NORMAL);
+        ;(function(x, y, delay) {
+          setTimeout(() => {
+            spawnPressIn(x, y);
+            spawnRipple(x, y, false);
+            vibrate(35);
+          }, delay);
+        })(px, py, feedbackDelay);
       }
     }
 
-    // 绑定触摸事件（passive: false 是必须的，否则 preventDefault 失效）
-    stage.addEventListener('touchstart', onTouchStart,              { passive: false });
-    stage.addEventListener('touchmove',  e => e.preventDefault(),  { passive: false });
-    stage.addEventListener('touchend',   e => e.preventDefault(),  { passive: false });
-
-    // iOS 双指手势（缩放）的额外拦截
+    document.addEventListener('touchstart', onTouchStart,             { passive: false });
+    document.addEventListener('touchmove',  e => e.preventDefault(), { passive: false });
+    document.addEventListener('touchend',   e => e.preventDefault(), { passive: false });
     document.addEventListener('gesturestart', e => e.preventDefault(), { passive: false });
+    document.addEventListener('contextmenu',  e => e.preventDefault());
 
-    // 右键 / 长按菜单
-    document.addEventListener('contextmenu', e => e.preventDefault());
-
-    // 300ms 内的第二次 touchend = 双击 → 拦截（防止浏览器放大）
-    let lastTap = 0;
+    // 防双击放大
+    let _lt = 0;
     document.addEventListener('touchend', e => {
-      const now = Date.now();
-      if (now - lastTap < 300) e.preventDefault();
-      lastTap = now;
+      const n = Date.now();
+      if (n - _lt < 300) e.preventDefault();
+      _lt = n;
     }, { passive: false });
 
+    /* ════════════════════════════════════════════════════════
+       呼吸循环 (RAF)
+       ════════════════════════════════════════════════════════ */
+    function breathLoop(now) {
+      requestAnimationFrame(breathLoop);
 
-    // ==============================================================
-    // 监听服务器广播：triggerSugar（糖 = 给观众的奖励）
-    //
-    // 接口字段：{ big, x, y }
-    //   big = true  → 变率强化大奖励（约 1/8 概率，由服务器决定）
-    //   big = false → 普通奖励
-    //
-    // 客户端【不再】自行随机，big 值完全由服务器决定。
-    // ==============================================================
-    socket.on('triggerSugar', payload => {
-      if (isOffline) return;
+      if (lastRafTime === null) lastRafTime = now;
+      const dt = Math.min((now - lastRafTime) / 1000, 0.1);
+      lastRafTime = now;
 
-      const big = payload && payload.tier === 'large';
+      // 平滑频率（不跳变）
+      breathFreq = lerp(breathFreq, breathFreqTarget, 0.03);
 
-      if (big) {
-        // 大奖励：在屏幕中心爆发一个更大的光晕 + 强节奏震动
-        spawnEmber(window.innerWidth / 2, window.innerHeight / 2, true);
-        vibrate([0, 55, 35, 80]); // 有节奏的双震动，像「中奖」
+      // 连击超时 → 目标回落
+      if (combo > 0 && (now - lastTapTime) > COMBO_WIN) {
+        combo = 0;
+        breathFreqTarget = 0.16;
       }
-      // 普通 sugar：触摸本身的光点已经是反馈，不需要额外叠加
-    });
 
+      // 累积相位（核心：频率切换时曲线连续）
+      breathPhase += breathFreq * dt * Math.PI * 2;
+      const breathNorm = (Math.sin(breathPhase) + 1) / 2; // 0~1
 
-    // ==============================================================
-    // 监听服务器广播：state（完整状态快照，约每秒 10 次）
-    // 我们只关心 status 字段：ONLINE / OFFLINE
-    // ==============================================================
-    socket.on('state', s => {
-      if (!s) return;
-      setOffline(s.status === 'OFFLINE');
-    });
+      // Idle 招揽：振幅
+      const idleMs = now - lastTouchTime;
+      if (ENABLE_IDLE_ATTRACT && !isOffline && idleMs > 45000) {
+        breathAmplitude = lerp(breathAmplitude, 2.7,  0.0008);
+      } else {
+        breathAmplitude = lerp(breathAmplitude, 1.0,  0.06);
+      }
 
-    // systemOffline / systemOnline 单独事件，做双保险
-    socket.on('systemOffline', () => setOffline(true));
-    socket.on('systemOnline',  () => setOffline(false));
+      // 亮度计算：基础 0.020 + energy 补偿 + 正弦波动 0.016
+      const energyBoost  = (energy / 100) * 0.006;
+      const opacity      = 0.020 + energyBoost + breathNorm * 0.016 * breathAmplitude;
+      const finalOpacity = isOffline ? opacity * 0.4 : opacity;
 
+      glowEl.style.background =
+        `radial-gradient(circle at 50% 50%,` +
+        ` rgba(210,145,65,${finalOpacity.toFixed(4)}) 0%,` +
+        ` rgba(150,90,25,${(finalOpacity * 0.32).toFixed(4)}) 46%,` +
+        ` transparent 72%)`;
+    }
+    requestAnimationFrame(breathLoop);
 
-    // ==============================================================
-    // 工具函数
-    // ==============================================================
-
-    // 生成余烬光点
-    // px/py：屏幕像素坐标（圆心）
-    // big  ：是否使用大奖励样式
-    function spawnEmber(px, py, big) {
+    /* ════════════════════════════════════════════════════════
+       工具函数
+       ════════════════════════════════════════════════════════ */
+    function spawnPressIn(px, py) {
       const el = document.createElement('div');
-      el.classList.add('ember');
-      if (big) el.classList.add('ember-big');
+      el.className  = 'press-in';
       el.style.left = px + 'px';
       el.style.top  = py + 'px';
-      stage.appendChild(el);
-      // 动画结束后自动移除，避免 DOM 越堆越多
+      fxEl.appendChild(el);
       el.addEventListener('animationend', () => el.remove(), { once: true });
     }
 
-    // 切换系统离线状态
-    // 正式版：屏幕保持纯黑，没有任何文字提示
+    function spawnRipple(px, py, big) {
+      const el = document.createElement('div');
+      el.className  = big ? 'ripple ripple-big' : 'ripple';
+      el.style.left = px + 'px';
+      el.style.top  = py + 'px';
+      fxEl.appendChild(el);
+      el.addEventListener('animationend', () => el.remove(), { once: true });
+    }
+
     function setOffline(off) {
       if (off === isOffline) return;
       isOffline = off;
-      // （如需调试可在此处加 console.log）
+      if (off) { combo = 0; breathFreqTarget = 0.16; }
     }
 
-    // 震动封装（不支持的设备静默跳过，不报错）
+    function lerp(a, b, t) { return a + (b - a) * t; }
+
     function vibrate(pattern) {
       if (navigator.vibrate) {
-        try { navigator.vibrate(pattern); } catch (e) {}
+        try { navigator.vibrate(pattern); } catch (_) {}
       }
-    }
-
-    // 将数值限制在 [min, max] 范围内
-    function clamp(v, min, max) {
-      return Math.min(max, Math.max(min, v));
     }
 
   </script>

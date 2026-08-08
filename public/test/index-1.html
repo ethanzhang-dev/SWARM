@@ -325,29 +325,6 @@ const FACE_OVAL_IDX = [
 
 
 // ══════════════════════════════════════════════════════════════════════
-//  ★★★ index_test.html 专用：三维几何结晶 Mesh ★★★
-//
-//  来源：Jeremie Wenger 导师反馈（强化视觉反馈与反差）。
-//  索引含义：每组 3 个数字 = 一个三角面，指向 faceMesh 的 landmark 序号。
-//  所有顶点索引来自已验证的 PATH_BASE / FACE_OVAL_IDX 坐标集，不存在越界。
-//
-//  不影响 index.html，仅在 index_test.html 中激活。
-// ══════════════════════════════════════════════════════════════════════
-
-// 测试开关（改为 false 可关闭结晶层，恢复原版外观）
-const SHOW_CRYSTAL_MESH = true;
-
-// 铁律：4 级灰阶
-const CRYSTAL_GRAY = [0, 85, 170, 255];
-
-// 最大顶点爆破幅度（px）
-const CRYSTAL_MAX_DISP = 16;
-
-// 结晶三角面片数组（由 buildCrystalTris() 在 setup() 里初始化）
-let crystalTris = [];
-
-
-// ══════════════════════════════════════════════════════════════════════
 //  一笔画路径
 //
 //  这是整个视觉的核心。一个连续的索引序列，笔从头走到尾不抬起。
@@ -698,8 +675,7 @@ function setup(){
   meshLayer = createGraphics(windowWidth, windowHeight);
   meshLayer.pixelDensity(1);
 
-  // ★ index_test.html 专用：构建结晶三角拓扑（只计算一次，复用整场）
-  crystalTris = buildCrystalTris();
+  // ── 今天新加②b：噪点图 ──
   // createImage 比 createGraphics 轻量，只存像素数据，没有绘图上下文开销
   noiseImg = createImage(GRAIN_W, GRAIN_H);
 
@@ -1266,9 +1242,6 @@ function draw(){
   drawMeshLayer(stage.chaos);
   drawFace(stage.chaos);
   drawHUD(stage);
-
-  // ★ index_test.html：临床进度条（压在最上层，总是可见）
-  drawProgressBar();
 }
 
 
@@ -1383,19 +1356,15 @@ function getStageParams(e, cycleProgress){
     chaosFromNeglect = 1;
   }
 
-  // ★★★ 双轴解耦：cycleProgress 不再驱动 chaos ★★★
-  //
-  //  旧设计：cycleProgress > 0.6 → chaosFromOveruse 升高 → 画面混乱
-  //           含义："观众点越多 → 画面越糟" ——与进度条正反馈矛盾
-  //
-  //  新设计（双轴分离）：
-  //    cycleProgress → 控制 Crystal Mesh 三角面完整度（在 drawCrystalMesh 里）
-  //    energy        → 控制"诊断信号稳定性"（发丝漂移、切片微震）
-  //
-  //  chaos 现在只由 energy 衰减驱动，代表"你停止点击时画面开始衰败"，
-  //  但不削减观众已经拼合的面部结构（skipBase 由 cycleProgress 保住）。
-  let chaos = max(chaosFromNeglect, confidenceFloor);
-  chaos = constrain(chaos, 0, 1);
+  let chaosFromOveruse = 0;
+  if(SHOW_OVERUSE_WARNING && cycleProgress){
+    chaosFromOveruse = constrain(map(cycleProgress, 0.6, 1.0, 0, 1), 0, 1);
+  }
+
+  // ── chaos 现在有三个来源取最大值：冷落 / 过度使用 / confidenceFloor基线 ──
+  // confidenceFloor 就是"哪怕energy满格，chaos也不会完全归零"的那条底线
+  let chaos = max(chaosFromNeglect, chaosFromOveruse, confidenceFloor);
+  chaos = constrain(chaos, 0, 1);   // 硬钳位：chaos 永远在[0,1]区间内，不会因为叠加而爆表
 
   return {
     videoAlpha,
@@ -2012,16 +1981,6 @@ function drawFace(chaos){
   }
 
 
-  // ══ ★ index_test.html 专用：结晶面片层 ══
-  // 在辉光遍之前画，确保：
-  //   · 填充三角形不受 shadowBlur 污染（结晶是临床硬边，不是发光物体）
-  //   · 压在辉光和发丝线下方，形成"3D 几何 → 发光 → 精密标注"三层叠加结构
-  //   · effectiveBreakAt 与发丝线共享，断裂同步（耳区、面部统一）
-  if (SHOW_CRYSTAL_MESH) {
-    drawingContext.shadowBlur = 0;   // 确保结晶层不受下方或上方的 shadowBlur 影响
-    drawCrystalMesh(pathologyLevel, flashIntensity, effectiveBreakAt);
-  }
-
   // ══ 第一遍：辉光（flash在这里最明显——shadowBlur半径剧烈扩张）══
   if(SHOW_GLOW && glowFactor > 0){
     let blurRadius = 22 + flashFactor * 58;
@@ -2063,13 +2022,6 @@ function drawFace(chaos){
 
   drawingContext.globalAlpha = 1.0;
   drawingContext.shadowBlur  = 0;
-
-  // ══ ★ index_test.html：五官特征双层描边（最后绘制，压住所有层）══
-  // 黑底(3px) + 白高亮(1.5~2.5px)，确保眼/眉/唇在任何切片灰阶下清晰可见。
-  // 触摸时 fi 驱动白线增粗，增强因果感。
-  if (SHOW_CRYSTAL_MESH) {
-    drawFeatureLines(pathologyLevel, flashIntensity);
-  }
 }
 
 
@@ -2153,409 +2105,8 @@ function earPoly(idx, isRight, chaos=0){
 
 
 // ══════════════════════════════════════════════════════════════════════
-//  ★ index_test.html 专用 ★
-//
-//  buildCrystalTris() —— 构建结晶三角拓扑
-//
-//  策略：使用 PATH_BASE / FACE_OVAL_IDX 里已验证的 landmark 序号，
-//  用"扇形展开"生成三角面片，完全避免凭记忆写 MediaPipe 1404 个数字
-//  （原 drawMeshLayer 注释已说明凭记忆容易写错）。
-//
-//  结构：
-//    ① 外轮廓扇形（36 tri）：以鼻梁 landmark 1 为扇心向脸部轮廓展开
-//    ② 双眉（各 3 tri）：沿眉毛路径扇形
-//    ③ 双眼（各 4 tri）：沿眼眶路径扇形
-//    ④ 鼻梁 strip（4 tri）：连续条形
-//    ⑤ 鼻底（5 tri）：以鼻中隔点 2 为扇心
-//    ⑥ 嘴轮廓扇形（18 tri）：以 landmark 0 为扇心
-//    ⑦ 内唇线（6 tri）：以 landmark 78 为扇心
-//  合计：约 83 个三角面，246 个索引。
-// ══════════════════════════════════════════════════════════════════════
-
-function buildCrystalTris() {
-  const t = [];   // 平铺 [ia, ib, ic,  ia, ib, ic, ...] 格式
-
-  // ── ① 外轮廓扇形（以 landmark 6 = 山根/两眼正中为扇心）──
-  // ★ 修复：旧版以 landmark 1（鼻梁低点）为扇心，侧面时变成"鸟喙"放射感。
-  //   landmark 6 = 眉间/山根，射线从眼睛高度向全脸辐射，
-  //   侧面视角呈现 LiDAR 激光扫描仪结构，彻底消除滑稽感。
-  const oval = FACE_OVAL_IDX.slice(0, -1);           // 36 points
-  for (let i = 0; i < oval.length; i++) {
-    t.push(6, oval[i], oval[(i + 1) % oval.length]); // 36 triangles, 扇心=6
-  }
-
-  // ── ② 右眉（PATH_BASE 里的顺序：70→63→105→66→107）──
-  //    以 105（眉弓中段）为扇心
-  const R_BROW = [70, 63, 105, 66, 107];
-  t.push(105, 70, 63);    // outer half
-  t.push(105, 66, 107);   // inner half
-
-  // ── ③ 左眉（285→295→282→283→276）──
-  //    以 295（眉弓中段）为扇心
-  const L_BROW = [285, 295, 282, 283, 276];
-  t.push(295, 285, 282);
-  t.push(295, 282, 283);
-  t.push(295, 283, 276);
-
-  // ── ④ 右眼（33→160→158→133→153→144→33，闭合路径）──
-  //    以 33（外眼角）为扇心
-  t.push(33, 160, 158);
-  t.push(33, 158, 133);
-  t.push(33, 133, 153);
-  t.push(33, 153, 144);
-
-  // ── ⑤ 左眼（263→387→385→373→380→263，闭合路径）──
-  //    以 263（外眼角）为扇心
-  t.push(263, 387, 385);
-  t.push(263, 385, 373);
-  t.push(263, 373, 380);
-
-  // ── ⑥ 鼻梁条形 strip（168→6→197→195→5→4）──
-  //    相邻四边形拆成两个三角
-  t.push(168, 6, 197);
-  t.push(6, 197, 195);
-  t.push(6, 195, 5);
-  t.push(195, 5, 4);
-
-  // ── ⑦ 鼻底与鼻翼（129→98→97→2→326→327→358）──
-  //    以 2（鼻中隔基点）为扇心
-  t.push(2, 129, 98);
-  t.push(2, 98, 97);
-  t.push(97, 2, 326);    // 跨过中心，闭合鼻底
-  t.push(2, 326, 327);
-  t.push(2, 327, 358);
-
-  // ── ⑧ 嘴外轮廓扇形（PATH_BASE 里的路径，已验证）──
-  //    以 0（上唇正中）为扇心，从 267 绕一圈到 37
-  const MOUTH = [0,267,269,270,409,291,375,321,405,314,17,84,181,91,146,61,185,40,39,37];
-  for (let i = 0; i < MOUTH.length - 2; i++) {
-    t.push(MOUTH[0], MOUTH[i + 1], MOUTH[i + 2]);   // 18 triangles
-  }
-
-  // ── ⑨ 内唇线（78→81→13→311→308→402→14→178）──
-  //    以 78（右嘴角内）为扇心
-  t.push(78, 81, 13);
-  t.push(78, 13, 311);
-  t.push(78, 311, 308);
-  t.push(78, 308, 402);
-  t.push(78, 402, 14);
-  t.push(78, 14, 178);
-
-  console.log('[CRYSTAL] 三角面片数:', t.length / 3);
-  return t;
-}
-
-
-// ══════════════════════════════════════════════════════════════════════
-//  getKpZ() —— 读取指定 landmark 的原始 Z 深度
-//
-//  MediaPipe FaceMesh 的 z 值：相对于鼻尖的深度偏移，
-//    z < 0 = 比鼻尖更靠近镜头（前景顶点）→ 亮
-//    z > 0 = 比鼻尖更远离镜头（背景顶点）→ 暗
-//  典型范围约 -0.05 ~ +0.05（normalized 坐标空间）。
-//  未检测到脸时返回 0（中性值，不影响灰阶）。
-// ══════════════════════════════════════════════════════════════════════
-
-function getKpZ(idx) {
-  if (!faces || faces.length === 0 || !faces[0].keypoints) return 0;
-  const kp = faces[0].keypoints[idx];
-  return kp ? (kp.z || 0) : 0;
-}
-
-
-// ══════════════════════════════════════════════════════════════════════
-//  drawCrystalMesh() v3 —— 双轴解耦版
-//
-//  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//  轴 1 · cycleProgress（0→1，累积，不回退）→ 面部几何完整度
-//  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//    skipBase = 0.80 × (1 − cycleProgress)
-//
-//    cycleProgress=0.0 → skipBase=0.80 → 仅 20% 三角面可见（碎裂残缺）
-//    cycleProgress=0.5 → skipBase=0.40 → 约 60% 三角面可见（拼合中）
-//    cycleProgress=1.0 → skipBase=0.00 → 100% 完整结晶脸（Jeremie：amazing）
-//
-//    flashIntensity 可临时增加可见量（触摸瞬间爆破感更完整）
-//    这一轴永远"向前"——面部结构只增不减。
-//
-//  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//  轴 2 · energy（100→0，瞬时，停手即降）→ 诊断信号稳定性
-//  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//    noiseAmt = (1 − energy/100) × 10 px
-//
-//    energy=100 → noiseAmt=0    → 切片边缘锐利，灰阶精准（健康信号）
-//    energy=50  → noiseAmt=5px  → 轻微顶点微震，灰阶轻颤
-//    energy=0   → noiseAmt=10px → 明显扫描噪波（信号衰败，但面结构保留）
-//
-//    不影响 skipBase → 已拼合的面部结构在 energy 衰退时不会消失。
-//
-//  其余保留：
-//    · 放射原点 pt(6)（山根，消除鸟喙感）
-//    · Z 深度加权（近亮远暗）
-//    · 灰阶区间 [40,200] + fi² 白色爆破
-//    · flashIntensity 径向顶点位移（从 pt(6) 向外）
-// ══════════════════════════════════════════════════════════════════════
-
-function drawCrystalMesh(chaos, fi, effectiveBreakAt) {
-  if (!SHOW_CRYSTAL_MESH) return;
-  if (!crystalTris || crystalTris.length === 0) return;
-  if (smooth.length < 200) return;
-
-  const numTris = crystalTris.length / 3;
-
-  // ── 轴 1：cycleProgress → 完整度 skipBase ──
-  // completionSkip: cycleProgress=0→0.80, cycleProgress=1→0.00（线性）
-  const completionSkip = constrain(0.80 * (1.0 - cycleProgress), 0.0, 0.80);
-  // fi 临时减少跳过量（触摸瞬间更多三角面闪现）
-  const skipBase = Math.max(0, completionSkip - fi * 0.35);
-
-  // ── 轴 2：energy → 噪波幅度 ──
-  // energy=100→0px，energy=0→10px
-  const noiseAmt = constrain((1.0 - energy / 100.0) * 10, 0, 10);
-
-  // 放射原点：landmark 6（山根/两眼正中）
-  const center = pt(6);
-
-  push();
-  strokeWeight(1.0);  // 铁律：1px 发丝描边
-  stroke(255);
-
-  for (let i = 0; i < numTris; i++) {
-    const ia = crystalTris[i * 3];
-    const ib = crystalTris[i * 3 + 1];
-    const ic = crystalTris[i * 3 + 2];
-
-    if (ia >= smooth.length || ib >= smooth.length || ic >= smooth.length) continue;
-
-    // 确定性跳过（skipBase 由 cycleProgress 决定，不再由 chaos 驱动）
-    const h = ((i * 2654435761) >>> 0) / 4294967295;
-    if (h < skipBase) continue;
-
-    // 顶点坐标（ptDrift 接收 energy→chaos，跟随信号漂移）
-    const pA = smooth[ia] ? ptDrift(ia, chaos) : center;
-    const pB = smooth[ib] ? ptDrift(ib, chaos) : center;
-    const pC = smooth[ic] ? ptDrift(ic, chaos) : center;
-    let ax = pA.x, ay = pA.y;
-    let bx = pB.x, by = pB.y;
-    let cx2 = pC.x, cy2 = pC.y;
-
-    // ── 轴 2：能量噪波（顶点微震，信号衰败感）──
-    // p5.noise() 而非 random()：平滑可重现，不产生视觉闪烁
-    if (noiseAmt > 0.5) {
-      const fc = frameCount * 0.04;
-      ax  += (noise(ia  * 0.13,       fc) - 0.5) * noiseAmt * 2;
-      ay  += (noise(ia  * 0.13 + 200, fc) - 0.5) * noiseAmt * 2;
-      bx  += (noise(ib  * 0.13,       fc) - 0.5) * noiseAmt * 2;
-      by  += (noise(ib  * 0.13 + 200, fc) - 0.5) * noiseAmt * 2;
-      cx2 += (noise(ic  * 0.13,       fc) - 0.5) * noiseAmt * 2;
-      cy2 += (noise(ic  * 0.13 + 200, fc) - 0.5) * noiseAmt * 2;
-    }
-
-    // ── Z 深度加权（近亮/远暗，转头时立体折转）──
-    const zA  = getKpZ(ia), zB = getKpZ(ib), zC = getKpZ(ic);
-    const avgZ = (zA + zB + zC) / 3;
-    const depthFactor = constrain(map(avgZ, -0.05, 0.05, 1.15, 0.65), 0.65, 1.15);
-
-    // ── 灰阶 [40,200] + 能量灰阶微闪 + fi² 触摸白色爆破 ──
-    const baseGray   = 40 + ((i * 37) % 160);
-    const depthGray  = constrain(Math.round(baseGray * depthFactor), 20, 210);
-    // 能量低时灰阶轻微颤动（信号噪波效果）
-    const greyNoise  = noiseAmt > 0.5
-      ? (noise(i * 0.07 + 50, frameCount * 0.05) - 0.5) * noiseAmt * 4
-      : 0;
-    // fi=0→正常深度灰  fi=1→80% 向白（X光爆破感），fi² 让过渡更「爆」
-    const finalGray  = Math.round(constrain(
-      lerp(depthGray + greyNoise, 255, fi * fi * 0.80),
-      20, 255
-    ));
-
-    // ── 触摸顶点爆破（径向，从 pt(6) 向外，20fps 自然坍缩）──
-    if (fi > 0.001) {
-      const mag = fi * CRYSTAL_MAX_DISP;
-
-      const dAx = ax - center.x, dAy = ay - center.y;
-      const lenA = Math.sqrt(dAx * dAx + dAy * dAy) || 1;
-      ax  += (dAx / lenA) * mag;
-      ay  += (dAy / lenA) * mag;
-
-      const dBx = bx - center.x, dBy = by - center.y;
-      const lenB = Math.sqrt(dBx * dBx + dBy * dBy) || 1;
-      bx  += (dBx / lenB) * mag;
-      by  += (dBy / lenB) * mag;
-
-      const dCx = cx2 - center.x, dCy = cy2 - center.y;
-      const lenC = Math.sqrt(dCx * dCx + dCy * dCy) || 1;
-      cx2 += (dCx / lenC) * mag;
-      cy2 += (dCy / lenC) * mag;
-    }
-
-    fill(finalGray);
-    triangle(ax, ay, bx, by, cx2, cy2);
-  }
-
-  pop();
-}
-
-
-// ══════════════════════════════════════════════════════════════════════
-//  drawFeatureLines() —— 五官特征双层描边（绘制在结晶切片之上）
-//
-//  问题：高对比度结晶背景会"吞噬"1px 发丝线条，眼睛/嘴唇轮廓消失。
-//  解法：双层描边（Stroke Padding）——先黑底再白高亮，
-//        任意背景灰阶下均清晰可见，无需改动其他渲染逻辑。
-//
-//  双层参数：
-//    黑底   3.0px  stroke(0, 210)    ← 隔离背景，防止白线与灰色切片合并
-//    白高亮 1.5px  stroke(255)       ← fi=1 时提升至 2.5px（触摸响应）
-//
-//  绘制时机：在 drawFace() 的最后执行（压住所有层）。
-//  ★ 铁律：shadowBlur=0，noFill，无颜色渐变。
-// ══════════════════════════════════════════════════════════════════════
-
-function drawFeatureLines(chaos, fi) {
-  if (smooth.length < 200) return;
-
-  // ── 五官路径（全部来自已验证的 PATH_BASE 索引集）──
-  const FEATURES = [
-    [70, 63, 105, 66, 107],            // 右眉（外→内）
-    [285, 295, 282, 283, 276],         // 左眉（外→内）
-    [33, 160, 158, 133, 153, 144, 33], // 右眼（闭合）
-    [263, 387, 385, 373, 380, 263],    // 左眼（闭合）
-    // 嘴外轮廓（已验证，PATH_BASE 第 ⑧ 段）
-    [0,267,269,270,409,291,375,321,405,314,17,84,181,91,146,61,185,40,39,37,0],
-    [78, 81, 13, 311, 308, 402, 14, 178, 78]   // 内唇线（闭合）
-  ];
-
-  // 平滑折线（toSmoothPoly 含 Catmull-Rom 插值，与发丝层一致）
-  const pols = FEATURES.map(path => toSmoothPoly(path, 5, chaos));
-
-  // 高亮线宽随 fi 线性放大：1.5px(静止) → 2.5px(全闪)
-  const hiW = constrain(1.5 + fi * 1.0, 1.5, 2.5);
-
-  push();
-  noFill();
-  drawingContext.shadowBlur = 0;   // 铁律：五官线无光晕
-  drawingContext.globalAlpha = 1.0;
-
-  for (const poly of pols) {
-    if (!poly || poly.length < 2) continue;
-
-    // ── Pass 1：黑色底边（3px，提供背景对比度分离）──
-    stroke(0, 210);
-    strokeWeight(3.0);
-    for (let k = 0; k < poly.length - 1; k++) {
-      line(poly[k].x, poly[k].y, poly[k + 1].x, poly[k + 1].y);
-    }
-
-    // ── Pass 2：白色高亮线（压在黑底上方）──
-    stroke(255);
-    strokeWeight(hiW);
-    for (let k = 0; k < poly.length - 1; k++) {
-      line(poly[k].x, poly[k].y, poly[k + 1].x, poly[k + 1].y);
-    }
-  }
-
-  pop();
-}
-
-
-// ══════════════════════════════════════════════════════════════════════
-//  drawProgressBar() —— 大号临床进度条（index_test.html 专用）
-//
-//  绑定：cycleProgress（0→1，服务器广播，观众累计点击÷阈值）
-//
-//  设计原则：
-//    · 极简 1px 白色边框，内部 4 级灰阶分格填充（铁律延伸）
-//    · 纯黑背景格 + 白色边线，无任何颜色
-//    · 大号百分比文字（~height×4%），1.5米外清晰可读
-//    · 状态文字随进度切换（机构语言，让观众觉得自己在"帮助系统"）
-//
-//  位置：屏幕右侧，竖向居中，不遮挡面部
-//
-//  ★ 这是"糖衣"：观众看到条在涨（RECOVERING→NOMINAL），
-//    表演者耳机里刀声越来越密——同一个 cycleProgress 驱动正反馈和惩罚。
-// ══════════════════════════════════════════════════════════════════════
-
-function drawProgressBar() {
-  const pct = constrain(cycleProgress, 0, 1);
-
-  // ── 几何参数 ──────────────────────────────────────────────────────
-  const barW   = constrain(width * 0.046, 42, 58);  // ~4.6% 屏宽，42~58px
-  const barH   = height * 0.70;                      // 70% 屏高
-  const barX   = width - barW - 18;                  // 右侧，留 18px 边距
-  const barY   = (height - barH) * 0.5;             // 竖向居中
-
-  // 24 格（每格约 4.17%，每 6 格 = 25%）
-  const N_SEGS     = 24;
-  const segH       = barH / N_SEGS;
-  const SEG_GAP    = 2;                              // 格间间隙（px）
-  const filledSegs = Math.round(pct * N_SEGS);
-
-  // 4 级临床灰阶（底部深→顶部浅，呼应"能量积累"的视觉逻辑）
-  const SEG_GRAYS = [55, 100, 150, 200];
-
-  push();
-  drawingContext.shadowBlur = 0;
-  textFont('monospace');
-
-  // ── 分格填充（从底部向上，底=第0格，顶=第N-1格）──
-  noStroke();
-  for (let k = 0; k < filledSegs; k++) {
-    fill(SEG_GRAYS[k % 4]);
-    const sy = barY + (N_SEGS - 1 - k) * segH;
-    rect(barX + 1, sy + SEG_GAP * 0.5, barW - 2, segH - SEG_GAP);
-  }
-
-  // ── 25% / 50% / 75% 刻度（小横线 + 数字）──
-  [0.25, 0.50, 0.75].forEach(t => {
-    const ty = barY + barH * (1.0 - t);
-    stroke(100);
-    strokeWeight(1.0);
-    line(barX - 6, ty, barX, ty);        // 外刻度线
-    stroke(50);
-    line(barX, ty, barX + barW, ty);     // 内分割线（极淡）
-    noStroke();
-    fill(130);
-    textSize(constrain(barW * 0.28, 8, 11));
-    textAlign(RIGHT, CENTER);
-    text(Math.round(t * 100), barX - 8, ty);
-  });
-
-  // ── 外框（1px 白色，最后画，压住填充）──
-  noFill();
-  stroke(255);
-  strokeWeight(1.0);
-  rect(barX, barY, barW, barH);
-
-  // ── 临床标签（条上方）──
-  noStroke();
-  fill(255);
-  const labelSz = constrain(barW * 0.28, 9, 12);
-  textSize(labelSz);
-  textAlign(CENTER, BOTTOM);
-  text('SYS', barX + barW * 0.5, barY - 16);
-  text('INTGR.', barX + barW * 0.5, barY - 4);
-
-  // ── 大号百分比（条下方，1.5m 外可见）──
-  const pctSz = constrain(height * 0.038, 28, 60);  // ~height×3.8%
-  fill(255);
-  textSize(pctSz);
-  textAlign(CENTER, TOP);
-  text(nf(Math.floor(pct * 100), 2) + '%', barX + barW * 0.5, barY + barH + 12);
-
-  // ── 状态文字（进度百分比下方，机构语言"糖衣"）──
-  const statusSz = constrain(barW * 0.28, 9, 11);
-  fill(160);
-  textSize(statusSz);
-  textAlign(CENTER, TOP);
-  const statusStr = pct < 0.25 ? 'DEGRADED'
-                  : pct < 0.55 ? 'RECOVERING'
-                  : pct < 0.88 ? 'NOMINAL'
-                  : 'SUSTAINED';
-  text(statusStr, barX + barW * 0.5, barY + barH + 12 + pctSz + 5);
-
-  pop();
-}
+//  hairPolys() —— 头发
+//  v3 的头发像太阳，因为：数量均匀、长度接近、方向笔直。
 //  这版：只取一半发根、长度用噪声拉开 0.3~1.8 倍、加正弦卷曲。
 // ══════════════════════════════════════════════════════════════════════
 

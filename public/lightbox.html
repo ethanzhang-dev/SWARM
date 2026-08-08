@@ -6,14 +6,26 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black">
-
 <title>SWARM</title>
 
-<script src="https://cyber-swarm-backend.onrender.com/socket.io/socket.io.js"></script>
+<!-- Socket.io 客户端 -->
+<script src="http://10.9.3.189:3000/socket.io/socket.io.js"></script>
 
+<!-- 等宽字体 -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
+
+<!-- ★ 动态 flicker 关键帧（由 JS 实时覆盖内容，不要在这里手动改值） -->
+<style id="flicker-keyframes">
+@keyframes flicker {
+  0%, 91%, 100% { opacity: 1; }
+  92%  { opacity: 0.84; }
+  93%  { opacity: 0.92; }
+  94%  { opacity: 0.76; }
+  95%  { opacity: 0.90; }
+}
+</style>
 
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -60,7 +72,7 @@ body::after {
 .rule--top    { top: 10px; }
 .rule--bottom { bottom: 10px; }
 
-/* 滚动文字 */
+/* 滚动文字容器 */
 .ticker {
   position: fixed; inset: 0;
   display: flex; align-items: center;
@@ -73,22 +85,18 @@ body::after {
   font-size: clamp(1.6rem, 5.5vh, 5rem);
   letter-spacing: 0.15em;
   text-transform: uppercase;
+
+  /* ★【临床化】只保留两层硬边辉光，删掉 0 0 30px 虚假扩散层 */
+  /* 物理光晕交给 LED 硬件，代码不做虚假渲染                   */
   text-shadow:
     0 0 4px  rgba(255,140,0,0.55),
-    0 0 14px rgba(255,140,0,0.18),
-    0 0 30px rgba(255,100,0,0.06);
+    0 0 14px rgba(255,140,0,0.14);
+
+  /* 初始 flicker 周期 11s，JS 会动态覆盖为 4.5s */
+  animation: flicker 11s ease-in-out infinite;
 }
 
-@keyframes flicker {
-  0%, 91%, 100% { opacity: 1; }
-  92% { opacity: 0.84; }
-  93% { opacity: 0.96; }
-  94% { opacity: 0.76; }
-  95% { opacity: 0.93; }
-}
-#track { animation: flicker 11s ease-in-out infinite; }
-
-/* 竖屏提醒 */
+/* 竖屏提醒（展览时平板锁定横屏，观众永远看不到） */
 @media (orientation: portrait) {
   body::before {
     content: 'ROTATE DEVICE';
@@ -97,10 +105,11 @@ body::after {
     font-family: inherit; color: #FF8C00;
     opacity: 0.35; font-size: 1rem; letter-spacing: 0.25em;
     z-index: 200;
+    /* ★ 无任何 text-shadow / glow */
   }
 }
 
-/* 连接状态灯（左上角，4px，观众不会注意） */
+/* 连接状态指示灯（左上角 4px，观众不会注意） */
 #dot {
   position: fixed; top: 5px; left: 5px;
   width: 4px; height: 4px; border-radius: 50%;
@@ -120,69 +129,52 @@ body::after {
 
 <script>
 // ============================================================
-//  SWARM · 灯箱 · 最终版（含全部隐患修复）
-//  2026-07-23
+//  SWARM · 灯箱 · 最终版（接口合同 2026-07-23 · 临床化重构）
 //
-//  修复记录：
-//  ① sock.on('touch') 删除——服务器从不广播该事件，死代码
-//  ② 阶段判断改用 cycleProgress（0→1）而非 energy
-//     energy 因触摸 +6 永远被顶住，灯箱阶段永远不变
-//     cycleProgress = cycleTouches/150，每摸一下往上涨
-//  ③ 触摸计数改从 d.contribution 同步
-//     服务器没有 touchCount 字段，有 contribution（4471902起）
-//
-//  URL 参数（展场调参不用改代码）：
-//    ?speed=100          滚动速度(px/s)，默认85
-//    ?gap=2000           消息间隔(ms)，默认2500
-//    ?phase=premonition  强制初始阶段（测试用）
-//    ?count=500          模拟已有500次触摸
-//
-//  控制台调试（F12 → Console）：
-//    debugPhase('revelation')
-//    debugCount(100)
-//    debugSpeed(120)
-//    debugGap(1000)
+//  本次重构要点：
+//  1. 服务器地址换为本地测试（10.9.3.189:3000）
+//  2. text-shadow 删掉 30px 虚假软光晕，只留 4px + 14px 两层
+//  3. Flicker 动态化：周期 11s→4.5s，深度 0.84→0.55
+//     跟随 fx.lightboxSpeed 实时更新，越接近崩溃闪得越频繁越深
+//  4. 新增 offline 维护态文案（socket 断开时显示）
+//  5. 新增 sessionReset / lightCue 事件监听
+//  6. 阶段判断严格使用 cycleProgress，不用 energy
 // ============================================================
 
 
-// ── URL 参数读取 ──────────────────────────────────────────
+// ── 服务器地址 ────────────────────────────────────────────
+const SERVER = 'http://10.9.3.189:3000';              // ← 本地测试
+// const SERVER = 'https://cyber-swarm-backend.onrender.com'; // 线上
 
-const P = new URLSearchParams(window.location.search);
+
+// ── URL 参数读取（展场微调用，会被服务器 fx 值覆盖） ─────
+const P  = new URLSearchParams(window.location.search);
 const pi = (k, d) => { const v = P.get(k); return v !== null ? parseInt(v,10) : d; };
 const ps = (k, d) => P.get(k) || d;
 
 
 // ── 配置 ──────────────────────────────────────────────────
-
 const CFG = {
-  server:    'https://cyber-swarm-backend.onrender.com',
-  baseCount: 4471902,           // 与 server.js CONTRIBUTION_START 一致
-  speed:     pi('speed', 85),   // px/s
-  gap:       pi('gap', 2500),   // ms
+  baseCount: 4471902,         // 与 server.js CONTRIBUTION_START 一致
 
-  // cycleProgress 阶段阈值（服务器已确认广播此字段）
-  // cycleProgress = cycleTouches / 150，从 0 涨到 1
-  // < 0.40 → 阶段1（前 60 次触摸）   约 60 秒
-  // < 0.73 → 阶段2（第 61-109 次）   约 50 秒
-  // ≥ 0.73 → 阶段3（第 110-150 次）  约 40 秒
-  p1: 0.40,
-  p2: 0.73,
+  // 初始值来自 URL 参数，之后被 state.fx 实时覆盖
+  speed: pi('speed', 85),     // px/s，fx 范围 44-85（越慢越接近崩溃）
+  gap:   pi('gap',  2500),    // ms，fx 范围 2500-4300（停顿越来越长）
+
+  // ★ cycleProgress 阶段阈值，严禁改回 energy
+  p1: 0.40,   // < 0.40 → 诱导期（前 60 次触摸）
+  p2: 0.73,   // < 0.73 → 预兆期（61-109 次）  ≥ 0.73 → 揭示期
 };
 
 
-// ── 三阶段文案 ────────────────────────────────────────────
-//
-// {COUNT} 会被替换为实时累积计数（格式：4,471,933）
-//
-// 设计原则（Swift 方法）：
-// 每句话脱离语境读完全正当甚至友善。
-// 恐怖从不来自文字本身，而来自观众意识到
-// "the system"和"it"指的是坐在那里的那个人。
+// ── 四阶段文案 ────────────────────────────────────────────
+// {COUNT} 会被实时累积计数替换（格式：4,471,933）
 
 const COPY = {
 
-  // 阶段1 · INDUCTION（诱导期）
-  // energy 充足 · 温暖、游戏化、无害
+  // ── 阶段1 · INDUCTION（诱导期）──────────────────────────
+  // cycleProgress < 0.40，约前 60 次触摸
+  // 语感：APP 引导页、Duolingo 鼓励、慈善官网——温暖、游戏化、无害
   induction: [
     'Touch to sustain.',
     'Every touch counts.',
@@ -193,13 +185,13 @@ const COPY = {
     'Connection active.',
   ],
 
-  // 阶段2 · PREMONITION（预兆期）
-  // 语域从"游戏"滑向"劳动"
-  // 数字太大、被记录的暗示
+  // ── 阶段2 · PREMONITION（预兆期）───────────────────────
+  // cycleProgress 0.40-0.73，约第 61-109 次触摸
+  // 语感：仍然温柔，但语域从"游戏"悄悄滑向"劳动"
   premonition: [
     'Contribution #{COUNT}.',
     'Your care has been noted.',
-    'Average session: 14 hours.',   // 内容审核员真实班次时长
+    'Average session: 14 hours.',       // 内容审核员真实班次时长
     'Sustained uptime: 97.3%.',
     'Your input improves the system.',
     'A replacement is available if needed.',
@@ -207,11 +199,12 @@ const COPY = {
     'Your wellbeing is important to us.',
   ],
 
-  // 阶段3 · REVELATION（揭示期）
-  // 第一句必须在最前——进入阶段3第一条必然出现
-  // 同样的温柔语气，意义全部翻转
+  // ── 阶段3 · REVELATION（揭示期）────────────────────────
+  // cycleProgress ≥ 0.73 / systemOffline，约第 110-150 次触摸
+  // 同样的温柔语气，每个词的意义翻转
+  // ★ 第一句固定在最前——进入揭示期第一条必然出现
   revelation: [
-    'Thank you for keeping the system alive.',  // ← 核心句，第一位
+    'Thank you for keeping the system alive.',
     'Supply depleted. Please stand by.',
     'Session complete. Your contribution has been recorded.',
     'The system will resume shortly.',
@@ -219,98 +212,69 @@ const COPY = {
     'Your patience is appreciated.',
     'All contributions have been recorded.',
   ],
+
+  // ── 阶段4 · OFFLINE（装置维护态）──────────────────────
+  // socket 断开 / 服务器不可达时显示
+  // 语感：设施运维公告，冷静、官僚、非个人
+  // ★ 无任何 glow 特殊处理——和其他阶段用同一个 #track 渲染
+  offline: [
+    'Awaiting connection.',
+    'Source unavailable.',
+    'Please stand by.',
+    'Service will resume.',
+    'Thank you for your patience.',
+  ],
 };
 
 
-// ── 状态 ──────────────────────────────────────────────────
-
-let phase   = ps('phase', 'induction');
-let msgIdx  = 0;
-let touches = pi('count', 0);   // 本地触摸计数（从 triggerSugar 事件累积）
-let offline = false;
-let busy    = false;
+// ── 状态变量 ──────────────────────────────────────────────
+// 初始阶段 offline——socket 连接成功后由 state 事件修正
+let phase      = ps('phase', 'offline');
+let msgIdx     = 0;
+let touches    = pi('count', 0);
+let systemDown = false;   // true = systemOffline / isOnline===false
+let busy       = false;
 
 const track = document.getElementById('track');
 const dot   = document.getElementById('dot');
 
 
-// ── Socket.io ─────────────────────────────────────────────
+// ── 动态 Flicker ──────────────────────────────────────────
+// 根据 fx.lightboxSpeed 实时更新关键帧深度和动画周期：
+//   speed 85（早期）→ 周期 11s，深度 0.84（闪得少且浅）
+//   speed 44（崩溃前）→ 周期 4.5s，深度 0.55（闪得频繁且深）
+//
+// 实现方式：替换 <style id="flicker-keyframes"> 的内容
+// Chrome 在下一个动画迭代自动拾取新关键帧；
+// animation-duration 改动立即生效，不需要重启动画
 
-let sock = null;
+let prevFlickerSpeed = -1;
 
-try {
-  sock = io(CFG.server, {
-    reconnection: true,
-    reconnectionDelay: 2000,
-    reconnectionAttempts: Infinity,
-  });
-} catch(e) {
-  console.warn('[灯箱] Socket.io 未加载，离线演示模式');
-}
+function updateFlicker(speed) {
+  // 只在速度有显著变化时更新（防止每 500ms 重写 DOM）
+  if (Math.abs(speed - prevFlickerSpeed) < 0.8) return;
+  prevFlickerSpeed = speed;
 
-if (sock) {
+  // 归一化 t：speed=85 → t=0（早期），speed=44 → t=1（临近崩溃）
+  const t      = Math.max(0, Math.min(1, (85 - speed) / (85 - 44)));
+  const period = (11 - t * 6.5).toFixed(2);          // 11s → 4.5s
+  const depth  = (0.84 - t * 0.29).toFixed(3);       // 0.84 → 0.55
+  const mid    = ((1 + parseFloat(depth)) / 2).toFixed(3);
+  const deep2  = (parseFloat(depth) * 0.91).toFixed(3);
+  const mid2   = (parseFloat(mid)   * 0.99).toFixed(3);
 
-  sock.on('connect', () => {
-    console.log('[灯箱] ✓ 已连接');
-    dot.className = 'on';
-  });
+  // 写入新关键帧
+  document.getElementById('flicker-keyframes').textContent =
+    `@keyframes flicker {
+      0%, 91%, 100% { opacity: 1; }
+      92%  { opacity: ${depth}; }
+      93%  { opacity: ${mid}; }
+      94%  { opacity: ${deep2}; }
+      95%  { opacity: ${mid2}; }
+    }`;
 
-  sock.on('disconnect', () => {
-    console.log('[灯箱] ✗ 断开');
-    dot.className = 'off';
-  });
-
-  // ── state 事件 ──────────────────────────────────────────
-  // 服务器广播字段（已从 server.js 确认）：
-  //   energy, totalTouches, cycleTouches,
-  //   cycleProgress, contribution, status, threshold
-  //
-  // ★ 阶段判断用 cycleProgress，不用 energy
-  //   原因：energy 因 ENERGY_PER_TOUCH=6 被持续顶住，
-  //   观众正常触摸时 energy 净增，永远不会掉到阈值以下。
-  //   cycleProgress 只增不减，是"观众已消耗多少"的真实反映。
-
-  function handleState(d) {
-    // 从服务器 contribution 同步计数（比本地 +1 更准确）
-    if (d.contribution && d.contribution > CFG.baseCount + touches) {
-      touches = d.contribution - CFG.baseCount;
-    }
-
-    if (!offline) {
-      const p = d.cycleProgress ?? 0;
-      if      (p < CFG.p1) setPhase('induction');
-      else if (p < CFG.p2) setPhase('premonition');
-      else                 setPhase('revelation');
-    }
-  }
-
-  // 同时监听两个事件名（兼容服务器可能的名称变化）
-  sock.on('state',       handleState);
-  sock.on('stateUpdate', handleState);
-
-  // ── 触摸计数 ────────────────────────────────────────────
-  // ★ 只监听 triggerSugar
-  //   服务器收到手机的 touch 事件后，只广播 triggerSugar（和 triggerKnife）
-  //   从不把 touch 原样转发——所以 sock.on('touch') 是死代码，已删除
-
-  sock.on('triggerSugar', () => { touches++; });
-
-  // ── 系统 OFFLINE ─────────────────────────────────────────
-  // 两种触发：cycleTouches >= 150（阈值），或 energy 自然衰减到 0
-  sock.on('systemOffline', () => {
-    console.log('[灯箱] ▼ OFFLINE');
-    offline = true;
-    setPhase('revelation');
-  });
-
-  // ── 系统恢复 ─────────────────────────────────────────────
-  // 20 秒后自动恢复，回到阶段1
-  // 最恐怖的部分：一切重新开始，就像什么都没发生过
-  sock.on('systemOnline', () => {
-    console.log('[灯箱] ▲ ONLINE');
-    offline = false;
-    setPhase('induction');
-  });
+  // 动画周期（立即生效）
+  track.style.animationDuration = period + 's';
 }
 
 
@@ -321,6 +285,143 @@ function setPhase(p) {
   console.log('[灯箱] ' + phase + ' → ' + p);
   phase  = p;
   msgIdx = 0;
+}
+
+
+// ── Socket.io ─────────────────────────────────────────────
+
+let sock = null;
+
+try {
+  sock = io(SERVER, {
+    reconnection: true,
+    reconnectionDelay: 2000,
+    reconnectionAttempts: Infinity,
+  });
+} catch(e) {
+  console.warn('[灯箱] Socket.io 未加载，离线演示模式');
+}
+
+if (sock) {
+
+  // ── 连接成功 ──────────────────────────────────────────
+  sock.on('connect', () => {
+    console.log('[灯箱] ✓ 已连接 ' + SERVER);
+    dot.className = 'on';
+    // 连接后先切到诱导期，等 state 事件到来后精确修正
+    if (phase === 'offline') setPhase('induction');
+  });
+
+  // ── 连接断开 ──────────────────────────────────────────
+  // socket 断开 = 装置维护态，显示 offline 文案
+  sock.on('disconnect', () => {
+    console.log('[灯箱] ✗ 断开 → 装置维护态');
+    dot.className = 'off';
+    systemDown = false;
+    setPhase('offline');
+  });
+
+  // ── state 事件 ────────────────────────────────────────
+  // 广播频率：每次触摸 + 每 500ms
+  // 接口合同 2026-07-23 字段：
+  //   cycleProgress, isOnline, contribution,
+  //   fx: { lightboxSpeed, lightboxGap, ... }
+
+  function handleState(d) {
+
+    // ① fx：更新滚动速度、停顿时长、flicker
+    if (d.fx) {
+      if (d.fx.lightboxSpeed) {
+        CFG.speed = d.fx.lightboxSpeed;
+        updateFlicker(CFG.speed);  // flicker 跟随 speed 实时变化
+      }
+      if (d.fx.lightboxGap) {
+        CFG.gap = d.fx.lightboxGap;
+      }
+    }
+
+    // ② 从 contribution 同步累积计数（只增不减）
+    if (d.contribution && d.contribution > CFG.baseCount + touches) {
+      touches = d.contribution - CFG.baseCount;
+    }
+
+    // ③ isOnline 判断 OFFLINE（比单纯监听事件更可靠：
+    //    刚连上时也能立刻同步正确状态，不会因错过事件而卡在诱导期）
+    if (d.isOnline === false) {
+      if (!systemDown) {
+        console.log('[灯箱] ▼ OFFLINE（来自 state.isOnline）');
+        systemDown = true;
+        setPhase('revelation');
+      }
+      return; // OFFLINE 期间不执行 cycleProgress 判断
+    }
+
+    // ④ 从 OFFLINE 恢复（isOnline 重新变成 true）
+    if (systemDown) {
+      console.log('[灯箱] ▲ ONLINE（来自 state.isOnline）');
+      systemDown = false;
+      setPhase('induction');
+    }
+
+    // ⑤ ★ cycleProgress 驱动三阶段（严禁改回 energy）
+    const p = d.cycleProgress ?? 0;
+    if      (p < CFG.p1) setPhase('induction');
+    else if (p < CFG.p2) setPhase('premonition');
+    else                 setPhase('revelation');
+  }
+
+  sock.on('state',       handleState);
+  sock.on('stateUpdate', handleState); // 兼容性保留
+
+  // ── triggerSugar：触摸计数 +1 ──────────────────────────
+  // payload: { tier, residue }，灯箱只关心"摸了一下"
+  sock.on('triggerSugar', () => { touches++; });
+
+  // ── systemOffline ────────────────────────────────────
+  // payload: { residue, cycle, fx }
+  // 作为 state.isOnline 的保险：确保事件不被错过
+  sock.on('systemOffline', (d) => {
+    if (!systemDown) {
+      console.log('[灯箱] ▼ OFFLINE（来自事件）', d?.residue);
+      systemDown = true;
+      setPhase('revelation');
+    }
+    // 更新 fx（OFFLINE 时服务器可能也下发新 fx 值）
+    if (d?.fx) {
+      if (d.fx.lightboxSpeed) { CFG.speed = d.fx.lightboxSpeed; updateFlicker(CFG.speed); }
+      if (d.fx.lightboxGap)   { CFG.gap   = d.fx.lightboxGap; }
+    }
+  });
+
+  // ── systemOnline ─────────────────────────────────────
+  // payload: { residue, cycle, fx }
+  // 最恐怖的部分：系统恢复，就像什么都没发生过
+  sock.on('systemOnline', (d) => {
+    console.log('[灯箱] ▲ ONLINE（来自事件）');
+    systemDown = false;
+    setPhase('induction');
+    if (d?.fx) {
+      if (d.fx.lightboxSpeed) { CFG.speed = d.fx.lightboxSpeed; updateFlicker(CFG.speed); }
+      if (d.fx.lightboxGap)   { CFG.gap   = d.fx.lightboxGap; }
+    }
+  });
+
+  // ── sessionReset ──────────────────────────────────────
+  // payload: { mode }
+  // 新的一轮演出开始：重置计数、清除 systemDown、回到诱导期
+  sock.on('sessionReset', (d) => {
+    console.log('[灯箱] ↺ SESSION RESET，mode:', d?.mode);
+    touches    = 0;
+    systemDown = false;
+    setPhase('induction');
+  });
+
+  // ── lightCue ─────────────────────────────────────────
+  // payload: { action, at }
+  // 灯光提示事件，灯箱不处理硬件，只记录日志（供展场调试）
+  sock.on('lightCue', (d) => {
+    console.log('[灯箱] 💡 lightCue:', d?.action, 'at', d?.at);
+  });
 }
 
 
@@ -336,8 +437,8 @@ function nextMessage() {
 
 
 // ── 滚动动画 ──────────────────────────────────────────────
-// CSS transform（GPU 合成层，不触发重排，旧平板也流畅）
 // 文字从右侧外进入 → 匀速滑到左侧外消失 → 停顿 → 下一条
+// 每次执行都读当前最新的 CFG.speed / CFG.gap（实时响应服务器 fx）
 
 function scroll() {
   if (busy) return;
@@ -346,11 +447,11 @@ function scroll() {
   track.textContent = nextMessage();
   track.style.transition = 'none';
   track.style.transform  = 'translateX(' + window.innerWidth + 'px)';
-  void track.offsetWidth;   // 强制重排，让 transform 立即生效
+  void track.offsetWidth; // 强制重排，让 transform 立即生效
 
   const textW   = track.offsetWidth;
   const dist    = window.innerWidth + textW;
-  const seconds = dist / CFG.speed;
+  const seconds = dist / CFG.speed;  // 每次读最新速度
 
   track.style.transition = 'transform ' + seconds + 's linear';
   track.style.transform  = 'translateX(-' + textW + 'px)';
@@ -361,16 +462,16 @@ function scroll() {
     handled = true;
     track.removeEventListener('transitionend', done);
     busy = false;
-    setTimeout(scroll, CFG.gap);
+    setTimeout(scroll, CFG.gap); // 每次读最新停顿
   }
   track.addEventListener('transitionend', done);
-  setTimeout(done, (seconds + 0.5) * 1000);   // 兜底，防止卡死
+  setTimeout(done, (seconds + 0.5) * 1000); // 兜底
 }
 
 
-// ── 全屏（第一次触摸时触发） ──────────────────────────────
+// ── 全屏（第一次触摸平板时触发） ─────────────────────────
 
-document.addEventListener('touchstart', function goFull() {
+document.addEventListener('touchstart', function() {
   const el  = document.documentElement;
   const rfs = el.requestFullscreen || el.webkitRequestFullscreen;
   if (rfs) try { rfs.call(el); } catch(_) {}
@@ -400,26 +501,26 @@ scroll();
 
 console.log([
   '',
-  '╔══════════════════════════════════════════╗',
-  '║   SWARM · 灯箱 · 最终版（修复后）       ║',
-  '╠══════════════════════════════════════════╣',
-  '║  服务器: ' + CFG.server,
-  '║  滚动速度: ' + CFG.speed + ' px/s',
-  '║  消息间隔: ' + CFG.gap + ' ms',
-  '║  初始阶段: ' + phase,
-  '║  计数基数: ' + CFG.baseCount.toLocaleString(),
-  '╠══════════════════════════════════════════╣',
-  '║  阶段阈值（cycleProgress）:              ║',
-  '║    < 0.40 → 诱导期（前60次触摸）        ║',
-  '║    < 0.73 → 预兆期（第61-109次）        ║',
-  '║    ≥ 0.73 → 揭示期（第110-150次）       ║',
-  '╠══════════════════════════════════════════╣',
-  '║  调试命令:                               ║',
-  '║    debugPhase("revelation")              ║',
-  '║    debugCount(100)                       ║',
-  '║    debugSpeed(120)                       ║',
-  '║    debugGap(1000)                        ║',
-  '╚══════════════════════════════════════════╝',
+  '╔══════════════════════════════════════════════╗',
+  '║   SWARM · 灯箱 · 最终版（临床化重构）       ║',
+  '╠══════════════════════════════════════════════╣',
+  '║  服务器: ' + SERVER,
+  '║  速度初始: ' + CFG.speed + ' px/s  (fx 范围 44-85)',
+  '║  间隔初始: ' + CFG.gap   + ' ms    (fx 范围 2500-4300)',
+  '║  阶段: ' + phase,
+  '╠══════════════════════════════════════════════╣',
+  '║  阶段阈值 cycleProgress（严禁改回 energy）   ║',
+  '║    < 0.40 → induction  （前 60 次触摸）     ║',
+  '║    < 0.73 → premonition（61-109 次）        ║',
+  '║    ≥ 0.73 → revelation （110-150 次）       ║',
+  '╠══════════════════════════════════════════════╣',
+  '║  调试命令：                                  ║',
+  '║    debugPhase("revelation")                  ║',
+  '║    debugPhase("offline")                     ║',
+  '║    debugCount(100)                           ║',
+  '║    debugSpeed(50)   ← 模拟临近崩溃的 fx     ║',
+  '║    debugGap(3500)                            ║',
+  '╚══════════════════════════════════════════════╝',
   '',
 ].join('\n'));
 
@@ -427,16 +528,22 @@ console.log([
 // ── 调试接口 ──────────────────────────────────────────────
 
 window.debugPhase = p => {
-  if (!COPY[p]) return console.log('可用: induction / premonition / revelation');
-  offline = (p === 'revelation');
+  if (!COPY[p]) return console.log('可用: induction / premonition / revelation / offline');
   setPhase(p);
 };
 window.debugCount = n => {
   touches += (n || 1);
   console.log('累积计数: ' + (CFG.baseCount + touches).toLocaleString());
 };
-window.debugSpeed = s => { CFG.speed = s; console.log('速度: ' + s); };
-window.debugGap   = ms => { CFG.gap = ms; console.log('间隔: ' + ms); };
+window.debugSpeed = s => {
+  CFG.speed = s;
+  updateFlicker(s);
+  console.log('速度: ' + s + ' px/s，flicker 已同步更新');
+};
+window.debugGap = ms => {
+  CFG.gap = ms;
+  console.log('间隔: ' + ms + 'ms');
+};
 
 </script>
 </body>

@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>THE WATCH · 后台控制台</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    *{ margin:0; padding:0; box-sizing:border-box; }
+    body{ background:#060606; color:#444; font-family:'Courier New',monospace;
+          font-size:11px; padding:20px; line-height:2; }
+    h1{ color:#2a2a2a; font-size:10px; letter-spacing:5px; margin-bottom:16px;
+        border-bottom:1px solid #111; padding-bottom:6px; }
+    .row{ display:flex; gap:8px; margin:8px 0; }
+    .block{ border:1px solid #111; padding:12px; margin:10px 0; }
+    .block h2{ color:#222; font-size:9px; letter-spacing:4px;
+               margin-bottom:8px; text-transform:uppercase; }
+    .val{ color:#0a6; letter-spacing:1px; }
+    .val.warn{ color:#660; }
+    .val.offline{ color:#400; }
+    button{ background:transparent; border:1px solid #1a1a1a; color:#333;
+            font-family:inherit; font-size:10px; padding:8px 14px;
+            cursor:pointer; letter-spacing:2px; text-transform:uppercase;
+            transition:border-color .15s, color .15s; }
+    button:hover{ border-color:#0a6; color:#0a6; }
+    button.danger{ border-color:#300; color:#400; }
+    button.danger:hover{ border-color:#a00; color:#a00; }
+    button.primary{ border-color:#0a6; color:#0a6; }
+    button.primary:hover{ background:#0a6; color:#000; }
+    #conn{ font-size:9px; margin-bottom:8px; }
+    .bar{ height:2px; background:#111; width:100%; margin:4px 0; }
+    .bar-fill{ height:100%; background:#0a6; transition:width .5s; }
+    .auto-badge{ font-size:9px; color:#222; padding:2px 6px;
+                 border:1px solid #111; display:inline-block; }
+    .auto-badge.on{ color:#0a6; border-color:#0a6; }
+    #log{ height:120px; overflow-y:auto; font-size:9px; color:#222;
+          border:1px solid #0d0d0d; padding:6px; background:#020202; }
+  </style>
+</head>
+<body>
+
+<h1>THE WATCH · BACKSTAGE</h1>
+<div id="conn" class="val warn">— 连接中</div>
+
+<!-- ── 核心状态面板 ─────────────────────────────────────── -->
+<div class="block">
+  <h2>系统状态</h2>
+  <div class="row" style="flex-wrap:wrap; gap:24px;">
+    <div>
+      <div style="color:#222;">MODE</div>
+      <div class="val" id="s-mode">—</div>
+    </div>
+    <div>
+      <div style="color:#222;">CYCLE</div>
+      <div class="val" id="s-cycle">—</div>
+    </div>
+    <div>
+      <div style="color:#222;">RESIDUE</div>
+      <div class="val" id="s-residue">—</div>
+    </div>
+    <div>
+      <div style="color:#222;">ENERGY</div>
+      <div class="val" id="s-energy">—</div>
+    </div>
+    <div>
+      <div style="color:#222;">STATUS</div>
+      <div class="val" id="s-online">—</div>
+    </div>
+  </div>
+  <div style="margin-top:8px; color:#222;">本轮进度</div>
+  <div class="bar"><div class="bar-fill" id="progress-bar" style="width:0%"></div></div>
+  <div id="s-progress" style="color:#222; font-size:9px;">0 / 0</div>
+</div>
+
+<!-- ── 自动排程状态 ───────────────────────────────────────── -->
+<div class="block">
+  <h2>自动排程 <span class="auto-badge" id="auto-badge">OFF</span></h2>
+  <div style="color:#222; font-size:9px; line-height:1.6;">
+    AUTO_SCHEDULE.enabled = false（server.js 第 ~30 行）<br>
+    展览前改为 true → 每天 11:00–18:00 自动切 performance
+  </div>
+</div>
+
+<!-- ── 操作按钮（只保留3个必要操作）──────────────────────── -->
+<div class="block">
+  <h2>操作</h2>
+  <small style="color:#111; display:block; margin-bottom:8px;">
+    ★ 正常表演中无需点任何按钮 —— 系统完全自动运行
+  </small>
+  <div class="row">
+    <button class="primary" onclick="startPerformance()">▶ 开始表演</button>
+    <button onclick="endPerformance()">■ 结束表演</button>
+  </div>
+  <div class="row" style="margin-top:8px;">
+    <button onclick="forceOffline()">⚡ 强制 OFFLINE</button>
+    <button class="danger" onclick="confirmReset()">↺ 完整重置</button>
+  </div>
+</div>
+
+<!-- ── 灯光指令日志 ───────────────────────────────────────── -->
+<div class="block">
+  <h2>事件日志</h2>
+  <div id="log"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
+<script>
+/* ════════════════════════════════════════════════════════════════
+   THE WATCH · cue.html v2（简化版，Task 2 · 08-04）
+   ════════════════════════════════════════════════════════════════
+   设计目标：单人展场，99% 的时间零操作。
+   服务器自动处理：OFFLINE/ONLINE 周期、灯光指令、状态广播。
+   人工干预只有：开始 / 结束表演 / 紧急强制 OFFLINE / 整场重置。
+   ════════════════════════════════════════════════════════════════ */
+
+const socket = io();
+
+socket.on('connect', () => {
+  document.getElementById('conn').textContent = '● ' + socket.id.substring(0,12);
+  document.getElementById('conn').className   = 'val';
+  addLog('已连接');
+});
+socket.on('disconnect', () => {
+  document.getElementById('conn').textContent = '○ 断线，等待重连';
+  document.getElementById('conn').className   = 'val warn';
+  addLog('断线');
+});
+
+socket.on('state', (s) => {
+  document.getElementById('s-mode').textContent    = s.mode || '—';
+  document.getElementById('s-cycle').textContent   = s.cycle !== undefined ? s.cycle : '—';
+  document.getElementById('s-residue').textContent = s.residue !== undefined ? (s.residue * 100).toFixed(1) + '%' : '—';
+  document.getElementById('s-energy').textContent  = s.energy  !== undefined ? s.energy.toFixed(0) : '—';
+
+  const onlineEl = document.getElementById('s-online');
+  onlineEl.textContent = s.isOnline ? 'ONLINE' : 'OFFLINE';
+  onlineEl.className   = 'val ' + (s.isOnline ? '' : 'offline');
+
+  const pct = ((s.cycleProgress || 0) * 100).toFixed(0);
+  document.getElementById('progress-bar').style.width = pct + '%';
+  document.getElementById('s-progress').textContent   =
+    `${s.cycleTouches || 0} / ${s.threshold || 0}  (${pct}%)`;
+});
+
+socket.on('systemOffline', () => addLog('↓ SYSTEM OFFLINE'));
+socket.on('systemOnline',  () => addLog('↑ SYSTEM ONLINE'));
+socket.on('sessionReset',  () => addLog('↺ SESSION RESET'));
+socket.on('lightCue', (d)  => addLog('💡 lightCue: ' + (d && d.action)));
+
+// ── 操作 ─────────────────────────────────────────────────────
+function startPerformance() {
+  socket.emit('ctrl:mode', { mode: 'performance' });
+  addLog('▶ 切换 → performance');
+}
+function endPerformance() {
+  socket.emit('ctrl:mode', { mode: 'installation' });
+  addLog('■ 切换 → installation');
+}
+function forceOffline() {
+  if (!confirm('强制触发 OFFLINE？（会启动 25 秒 OFFLINE 序列）')) return;
+  socket.emit('ctrl:forceOffline');
+  addLog('⚡ ctrl:forceOffline 已发送');
+}
+function confirmReset() {
+  const m = prompt('确认整场重置（输入 RESET 确认）：');
+  if (m !== 'RESET') return;
+  socket.emit('ctrl:reset', { mode: 'performance' });
+  addLog('↺ ctrl:reset 已发送');
+}
+
+// ── 日志 ─────────────────────────────────────────────────────
+function addLog(msg) {
+  const log = document.getElementById('log');
+  const ts  = new Date().toLocaleTimeString('zh', { hour12: false });
+  const div = document.createElement('div');
+  div.textContent = `[${ts}] ${msg}`;
+  log.insertBefore(div, log.firstChild);
+  if (log.children.length > 50) log.removeChild(log.lastChild);
+}
+</script>
+</body>
+</html>
