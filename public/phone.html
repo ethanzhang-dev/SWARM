@@ -122,6 +122,23 @@
       100% { transform: scale(1.06); opacity: 0.00; }
     }
 
+    /* ── idle 提示字（首次触摸后淡出） ──────────────────────*/
+    #idle-hint {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10;
+      pointer-events: none;
+      font-family: 'Courier New', monospace;
+      font-size: clamp(13px, 3.5vw, 22px);
+      letter-spacing: 0.25em;
+      color: #FFA000;
+      opacity: 0;
+      transition: opacity 1.2s ease;
+    }
+
     /* ── 调试指示（展览前删掉 <div id="dbg"> 整行） ─────────*/
     #dbg {
       position: fixed;
@@ -139,6 +156,7 @@
 <body>
   <div id="glow"></div>
   <div id="fx"></div>
+  <div id="idle-hint">TAP TO SUSTAIN</div>
 
   <!-- 调试指示：展览前删掉这一行 ↓ -->
   <div id="dbg">○</div>
@@ -169,9 +187,10 @@
     /* ════════════════════════════════════════════════════════
        DOM
        ════════════════════════════════════════════════════════ */
-    const glowEl = document.getElementById('glow');
-    const fxEl   = document.getElementById('fx');
-    const dbg    = document.getElementById('dbg');
+    const glowEl  = document.getElementById('glow');
+    const fxEl    = document.getElementById('fx');
+    const dbg     = document.getElementById('dbg');
+    const hintEl  = document.getElementById('idle-hint');
 
     /* ════════════════════════════════════════════════════════
        状态
@@ -251,6 +270,10 @@
        ════════════════════════════════════════════════════════ */
     function onTouchStart(e) {
       e.preventDefault();
+      if (!window._hintDone) {
+        window._hintDone = true;
+        hintEl.style.opacity = '0';
+      }
       if (isOffline) return;
 
       const now = performance.now();
@@ -297,6 +320,23 @@
       _lt = n;
     }, { passive: false });
 
+    // ── A. 首次触摸进全屏 ─────────────────────────────────
+    document.addEventListener('touchstart', function() {
+      if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch(() => {});
+      }
+    }, { once: true });
+
+    // ── B. 防锁屏（Wake Lock）────────────────────────────
+    let wakeLock = null;
+    async function keepAwake() {
+      try { wakeLock = await navigator.wakeLock.request('screen'); } catch(e) {}
+    }
+    document.addEventListener('touchstart', keepAwake, { once: true });
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') keepAwake();
+    });
+
     /* ════════════════════════════════════════════════════════
        呼吸循环 (RAF)
        ════════════════════════════════════════════════════════ */
@@ -338,6 +378,11 @@
         ` rgba(210,145,65,${finalOpacity.toFixed(4)}) 0%,` +
         ` rgba(150,90,25,${(finalOpacity * 0.32).toFixed(4)}) 46%,` +
         ` transparent 72%)`;
+
+      // idle-hint 随呼吸脉动（0.18~0.55），触摸后 _hintDone 置 true 则保持 0
+      if (!window._hintDone) {
+        hintEl.style.opacity = (0.18 + breathNorm * 0.37).toFixed(3);
+      }
     }
     requestAnimationFrame(breathLoop);
 
