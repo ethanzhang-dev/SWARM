@@ -1201,16 +1201,15 @@ function draw(){
   // 视频层不依赖 FaceMesh 是否检测到脸——只要摄像头开着就能画。
   drawVideoLayer(flashVideoAlpha);
 
-  if(!modelReady){
-    fill(70); noStroke(); textAlign(CENTER,CENTER); textSize(15);
-    text("FaceMesh 加载中……", viewCX(), viewCY());
-    noFill(); drawHUD(stage); return;
-  }
-
+  if(!modelReady) return;
   if(faces.length === 0){
-    fill(45); noStroke(); textAlign(CENTER,CENTER); textSize(14);
-    text("请把脸移入画面", viewCX(), viewCY());
-    noFill(); drawHUD(stage); return;
+    if(smooth && smooth.length > 200){
+      drawMeshLayer(stage.chaos);
+      drawFace(stage.chaos);
+      drawHUD(stage);
+      drawProgressBar();
+    }
+    return;
   }
 
   // ── 关键点平滑（低通滤波，消除 FaceMesh 的逐帧抖动）──
@@ -1229,7 +1228,7 @@ function draw(){
   //   在20fps时会自动补偿到同样的时间常数。
   // (注：原来0.35在60fps时半衰期约2帧≈33ms；0.18在60fps时半衰期约4帧≈67ms)
   // 保守一点让动作响应更清晰，展场时可在此处微调 k_smooth。
-  const k_smooth = 0.25;   // 60fps基准：每帧追赶25%；时间基会自动换算
+  const k_smooth = 0.18;   // 60fps基准：每帧追赶25%；时间基会自动换算
   let t_smooth = 1 - Math.pow(1 - k_smooth, DT / DT_REF);
 
   let kp = faces[0].keypoints;
