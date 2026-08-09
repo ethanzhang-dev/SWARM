@@ -292,6 +292,7 @@ let deathAlpha  = 0;               // frozenFrame 的当前透明度（0-1）
 // ── Flash 状态（阶段1：单次触摸的短暂过曝；阶段2：变成不稳定频闪）──
 // flashIntensity: 0-1，每帧自动衰减(×0.92)。触摸时跳回1.0。
 let flashIntensity = 0;
+let hitPulse = 0;
 
 
 // ══════════════════════════════════════════════════════════════════════
@@ -1190,6 +1191,7 @@ function draw(){
   sugarFlashPulse *= Math.pow(0.92,   DT / DT_REF);   // 脉冲：同一个系数，时间基版本
   flashIntensity  *= Math.pow(0.92,   DT / DT_REF);   // flash主体衰减
   if(flashIntensity < 0.001) flashIntensity = 0;
+  hitPulse = Math.max(0, hitPulse - 0.14);
 
   // ★ 触摸拉回：flash 时短暂提升视频层亮度
   // flashIntensity=1.0 时 videoAlpha 最多被推高 30（但不超过阶段1上限 80）
@@ -1579,6 +1581,7 @@ function setSystemOnline(recoveryEnergy) {
 
 function triggerFlash(){
   flashIntensity = 1.0;
+  hitPulse = 1.0;
 }
 
 
