@@ -671,7 +671,9 @@ function preload(){
 }
 
 function setup(){
-  createCanvas(windowWidth, windowHeight);
+  let canvas = createCanvas(windowWidth, windowHeight);
+  canvas.elt.setAttribute('tabindex', '0');
+  canvas.elt.focus();
   pixelDensity(1);            // 投影/电视不需要视网膜渲染，这是最大的性能优化
 
   // ★ 锁帧率为 20fps
