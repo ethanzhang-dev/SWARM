@@ -2482,25 +2482,23 @@ function drawProgressBar() {
   const pct = constrain(cycleProgress, 0, 1);
 
   // ── 几何参数 ──────────────────────────────────────────────────────
-  const barW   = constrain(width * 0.046, 42, 58);  // ~4.6% 屏宽，42~58px
-  const barH   = height * 0.70;                      // 70% 屏高
-  const barX   = width - barW - 18;                  // 右侧，留 18px 边距
-  const barY   = (height - barH) * 0.5;             // 竖向居中
+  const barW   = constrain(width * 0.046, 42, 58);
+  const barH   = height * 0.70;
+  const barX   = width - barW - 18;
+  const barY   = (height - barH) * 0.5;
 
-  // 24 格（每格约 4.17%，每 6 格 = 25%）
   const N_SEGS     = 24;
   const segH       = barH / N_SEGS;
-  const SEG_GAP    = 2;                              // 格间间隙（px）
+  const SEG_GAP    = 2;
   const filledSegs = Math.round(pct * N_SEGS);
 
-  // 4 级临床灰阶（底部深→顶部浅，呼应"能量积累"的视觉逻辑）
   const SEG_GRAYS = [55, 100, 150, 200];
 
   push();
   drawingContext.shadowBlur = 0;
   textFont('monospace');
 
-  // ── 分格填充（从底部向上，底=第0格，顶=第N-1格）──
+  // ── 分格填充（从底部向上）──
   noStroke();
   for (let k = 0; k < filledSegs; k++) {
     fill(SEG_GRAYS[k % 4]);
@@ -2508,14 +2506,23 @@ function drawProgressBar() {
     rect(barX + 1, sy + SEG_GAP * 0.5, barW - 2, segH - SEG_GAP);
   }
 
-  // ── 25% / 50% / 75% 刻度（小横线 + 数字）──
+  // ── A. 琥珀领先边缘 ──────────────────────────────────────────────
+  if (filledSegs > 0) {
+    const topIdx  = filledSegs - 1;
+    const brightness = 0.45 + 0.55 * hitPulse;
+    fill(255, 160, 0, 255 * brightness);
+    const sy = barY + (N_SEGS - 1 - topIdx) * segH;
+    rect(barX + 1, sy + SEG_GAP * 0.5, barW - 2, segH - SEG_GAP);
+  }
+
+  // ── 25% / 50% / 75% 刻度 ──
   [0.25, 0.50, 0.75].forEach(t => {
     const ty = barY + barH * (1.0 - t);
     stroke(100);
     strokeWeight(1.0);
-    line(barX - 6, ty, barX, ty);        // 外刻度线
+    line(barX - 6, ty, barX, ty);
     stroke(50);
-    line(barX, ty, barX + barW, ty);     // 内分割线（极淡）
+    line(barX, ty, barX + barW, ty);
     noStroke();
     fill(130);
     textSize(constrain(barW * 0.28, 8, 11));
@@ -2523,13 +2530,23 @@ function drawProgressBar() {
     text(Math.round(t * 100), barX - 8, ty);
   });
 
-  // ── 外框（1px 白色，最后画，压住填充）──
+  // ── 外框（1px 白色）──
   noFill();
   stroke(255);
   strokeWeight(1.0);
   rect(barX, barY, barW, barH);
 
-  // ── 临床标签（条上方）──
+  // ── B. 逼近临界琥珀警示框 ────────────────────────────────────────
+  if (pct > 0.85) {
+    const t      = (pct - 0.85) / 0.15;
+    const flash  = (sin(frameCount * (0.3 + t * 0.7)) > 0) ? 1 : 0.25;
+    noFill();
+    stroke(255, 160, 0, 255 * flash * t);
+    strokeWeight(2);
+    rect(barX - 3, barY - 3, barW + 6, barH + 6);
+  }
+
+  // ── 临床标签 ──
   noStroke();
   fill(255);
   const labelSz = constrain(barW * 0.28, 9, 12);
@@ -2538,14 +2555,14 @@ function drawProgressBar() {
   text('SYS', barX + barW * 0.5, barY - 16);
   text('INTGR.', barX + barW * 0.5, barY - 4);
 
-  // ── 大号百分比（条下方，1.5m 外可见）──
-  const pctSz = constrain(height * 0.038, 28, 60);  // ~height×3.8%
-  fill(255);
+  // ── C. 大号百分比（命中时琥珀，平时白）────────────────────────────
+  const pctSz = constrain(height * 0.038, 28, 60);
+  fill(hitPulse > 0.1 ? color(255, 160, 0) : color(255));
   textSize(pctSz);
   textAlign(CENTER, TOP);
   text(nf(Math.floor(pct * 100), 2) + '%', barX + barW * 0.5, barY + barH + 12);
 
-  // ── 状态文字（进度百分比下方，机构语言"糖衣"）──
+  // ── 状态文字 ──
   const statusSz = constrain(barW * 0.28, 9, 11);
   fill(160);
   textSize(statusSz);
