@@ -2359,7 +2359,7 @@ function drawCrystalMesh(chaos, fi, effectiveBreakAt) {
     const depthFactor = constrain(map(avgZ, -0.05, 0.05, 1.15, 0.65), 0.65, 1.15);
 
     // ── 灰阶 [40,200] + 能量灰阶微闪 + fi² 触摸白色爆破 ──
-    const baseGray   = 40 + ((i * 37) % 160);
+    const baseGray   = 60 + ((i * 37) % 140);
     const depthGray  = constrain(Math.round(baseGray * depthFactor), 20, 210);
     // 能量低时灰阶轻微颤动（信号噪波效果）
     const greyNoise  = noiseAmt > 0.5
@@ -2442,14 +2442,7 @@ function drawFeatureLines(chaos, fi) {
   for (const poly of pols) {
     if (!poly || poly.length < 2) continue;
 
-    // ── Pass 1：黑色底边（3px，提供背景对比度分离）──
-    stroke(0, 210);
-    strokeWeight(3.0);
-    for (let k = 0; k < poly.length - 1; k++) {
-      line(poly[k].x, poly[k].y, poly[k + 1].x, poly[k + 1].y);
-    }
-
-    // ── Pass 2：白色高亮线（压在黑底上方）──
+    // ── 白色高亮线 ──
     stroke(255);
     strokeWeight(hiW);
     for (let k = 0; k < poly.length - 1; k++) {
@@ -2651,7 +2644,7 @@ function drawHUD(stage){
   fill(140); textSize(10);
   let chaosStr = stage ? "  chaos=" + stage.chaos.toFixed(2) : "";
   chaosStr += "  cycleProg=" + cycleProgress.toFixed(2);
-  text("state=" + systemState + chaosStr + "  flash=" + flashIntensity.toFixed(2), 18, 163);
+  if(window._debugHUD) text("state=" + systemState + chaosStr + "  flash=" + flashIntensity.toFixed(2), 18, 163);
 
   fill(0,0,0,175); rect(10, height-90, width-20, 80, 3);
   fill(125); textSize(11); textAlign(LEFT,TOP);
@@ -2688,6 +2681,7 @@ function keyPressed(){
   if(k==='G') SHOW_GLOW = !SHOW_GLOW;
   if(k==='Y') SHOW_TRAVEL = !SHOW_TRAVEL;   // 过渡线开关：从T挪到Y（T现在是模拟触摸）
   if(k==='D') DETAIL = (DETAIL+1)%3;
+  if(key === '`') window._debugHUD = !window._debugHUD;
   if(k==='M'){ MASK_MODE = (MASK_MODE+1)%3; refreshMaskBtnStyles(); }  // 调试用，正式已锁定为1
   if(k==='1'){ PALETTE=0; customColor=null; }
   if(k==='2'){ PALETTE=1; customColor=null; }
