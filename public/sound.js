@@ -621,12 +621,29 @@
     _fireKnifeOn(knifeH, tier);
   }
 
+  // 低频冲击 → speakerBus（倒带刀声伴奏，展馆嘈杂环境补骨骼冲击感）
+  function playLowThud(when, dur = 0.35) {
+    const osc = new Tone.Oscillator({ frequency: 85, type: 'square' });
+    const env = new Tone.AmplitudeEnvelope({
+      attack:  0.002,
+      decay:   dur * 0.6,
+      sustain: 0,
+      release: dur * 0.4
+    });
+    osc.connect(env);
+    env.connect(speakerBus);
+    osc.start(when);
+    env.triggerAttackRelease(dur, when);
+    osc.stop(when + dur + 0.2);
+  }
+
   // 刀声 → 音箱（崩溃倒带时观众听到）
   // db  由服务器按 index 分层：index=0 → -3dB，index>0 → -10dB
   // ★ bypassMaxDb=true：音箱倒带不受耳机硬顶限制，-3dB 首发可以通过
   function playKnifeToSpeakers(tier, db, index) {
     if (!_guard()) return;
     _fireKnifeOn(knifeS, tier, typeof db === 'number' ? db : -18, true);
+    playLowThud(Tone.now());
   }
 
 
